@@ -112,6 +112,7 @@ def _items_in_folder(folder: Path, files: list[str], source: Path, wanted: set[s
                 source_root=source,
                 size=stat.st_size,
                 mtime=stat.st_mtime,
+                ctime=getattr(stat, "st_birthtime", stat.st_ctime if os.name == "nt" else None),
                 is_video=exts[name] in VIDEO_EXT,
                 companions=[folder / c for c in companions] if i == 0 else [],
             ))
@@ -142,7 +143,7 @@ def apply_metadata(item: MediaItem, entry: dict):
     if item.is_video:
         keys = ("CreateDate", "MediaCreateDate", "TrackCreateDate", "DateTimeOriginal")
     else:
-        keys = ("DateTimeOriginal", "CreateDate")
+        keys = ("DateTimeOriginal", "CreateDate", "DateTimeCreated", "DateCreated", "CreationTime")
     if not scanner:
         for key in keys:
             when = parse_date(entry.get(key))
@@ -199,8 +200,11 @@ def resolve_item(item: MediaItem, settings: Settings, index: PlaceIndex | None):
                     item.date, item.date_source, item.date_precision = found.when, DATE_FOLDER, found.precision
                     break
         if item.date is None and settings.use_file_date:
+            # la plus ancienne des dates du fichier : une copie garde la date de modification
+            # d'origine mais prend la date du jour comme date de création
+            stamps = [t for t in (item.mtime, item.ctime) if t]
             try:
-                when = datetime.fromtimestamp(item.mtime)
+                when = datetime.fromtimestamp(min(stamps)) if stamps else None
             except (OSError, OverflowError, ValueError):  # date de fichier aberrante
                 when = None
             if when and 1990 <= when.year <= datetime.now().year + 1:

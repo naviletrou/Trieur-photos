@@ -32,9 +32,10 @@ class MediaItem:
     path: Path                       # fichier d'origine
     source_root: Path                # dossier choisi comme source
     size: int
-    mtime: float
+    mtime: float                     # date de modification du fichier
     is_video: bool
     companions: list[Path] = field(default_factory=list)  # .xmp, .aae, vidéo d'une Live Photo
+    ctime: float | None = None       # date de création du fichier (souvent la date de copie)
 
     # métadonnées lues
     exif_date: datetime | None = None

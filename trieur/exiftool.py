@@ -27,6 +27,10 @@ READ_TAGS = [
     "-QuickTime:CreateDate",
     "-MediaCreateDate",
     "-TrackCreateDate",
+    # autres emplacements possibles de la date de prise de vue (XMP, IPTC, PNG)
+    "-DateCreated",
+    "-DateTimeCreated",
+    "-CreationTime",
     "-GPSLatitude#",
     "-GPSLongitude#",
     "-Make",
