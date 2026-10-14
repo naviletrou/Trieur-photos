@@ -5,3 +5,6 @@ dist/
 .pytest_cache/
 *.spec.bak
 vendor/
+data/lieux.csv.gz
+packaging/version.txt
+geonames/

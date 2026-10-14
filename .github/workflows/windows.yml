@@ -1,0 +1,109 @@
+name: Installateur Windows
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bibliothèques Python
+        run: pip install PySide6 Pillow pillow-heif numpy babel pyinstaller pytest
+
+      - name: Données GeoNames (en cache)
+        id: geonames
+        uses: actions/cache@v4
+        with:
+          path: geonames
+          key: geonames-v1
+
+      - name: Téléchargement GeoNames
+        if: steps.geonames.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          mkdir -p geonames && cd geonames
+          base=https://download.geonames.org/export/dump
+          curl -fsSLO $base/cities500.zip && unzip -o -q cities500.zip
+          curl -fsSLO $base/FR.zip && unzip -o -q FR.zip
+          curl -fsSLO $base/admin1CodesASCII.txt
+          curl -fsSLO $base/admin2Codes.txt
+          rm -f *.zip readme.txt
+
+      - name: Base des lieux
+        run: python tools/build_places.py geonames geonames
+
+      - name: ExifTool pour Windows
+        shell: bash
+        run: |
+          ver=$(curl -fsSL https://exiftool.org/ver.txt | tr -d '\r\n')
+          echo "ExifTool $ver"
+          curl -fsSL -o exiftool.zip "https://exiftool.org/exiftool-${ver}_64.zip" \
+            || curl -fsSL -o exiftool.zip "https://sourceforge.net/projects/exiftool/files/exiftool-${ver}_64.zip/download"
+          unzip -q exiftool.zip -d exiftool-tmp
+          folder=$(dirname "$(find exiftool-tmp -name 'exiftool(-k).exe' | head -1)")
+          mkdir -p vendor
+          mv "$folder" vendor/exiftool
+          mv "vendor/exiftool/exiftool(-k).exe" vendor/exiftool/exiftool.exe
+          vendor/exiftool/exiftool.exe -ver
+
+      - name: Tests
+        shell: bash
+        env:
+          TRIEUR_EXIFTOOL: ${{ github.workspace }}\vendor\exiftool\exiftool.exe
+          PYTHONIOENCODING: utf-8
+        run: python -m pytest -q
+
+      - name: Exécutable
+        shell: bash
+        run: |
+          python packaging/make_version.py > version.out
+          echo "TRIEUR_VERSION=$(cat version.out)" >> $GITHUB_ENV
+          pyinstaller --noconfirm --distpath dist --workpath build packaging/TrieurPhotos.spec
+
+      - name: Essai de l'exécutable
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\TrieurPhotos\TrieurPhotos.exe -PassThru
+          Start-Sleep -Seconds 12
+          if ($p.HasExited) { Write-Error "Le programme s'est arrêté au démarrage (code $($p.ExitCode))"; exit 1 }
+          Stop-Process -Id $p.Id
+          Write-Host "Démarrage OK"
+
+      - name: Installateur
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue)) { choco install innosetup -y --no-progress }
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc packaging\installateur.iss
+          Compress-Archive -Path dist\TrieurPhotos\* -DestinationPath dist\TrieurPhotos-portable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trieur-photos-windows
+          path: |
+            dist/TrieurPhotos-Installation.exe
+            dist/TrieurPhotos-portable.zip
+
+      # adresse fixe : https://github.com/<compte>/<dépôt>/releases/download/derniere-version/TrieurPhotos-Installation.exe
+      - name: Publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view derniere-version > /dev/null 2>&1; then
+            gh release create derniere-version --title "Trieur de photos - dernière version" \
+              --notes "Installateur Windows mis à jour à chaque modification." --target "$GITHUB_SHA"
+          fi
+          gh release upload derniere-version dist/TrieurPhotos-Installation.exe dist/TrieurPhotos-portable.zip --clobber

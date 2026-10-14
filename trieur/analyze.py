@@ -366,5 +366,7 @@ def summary(groups: list[Group]) -> dict:
         "dossiers": len({_norm(g.target_dir) for g in groups if g.target_dir}),
         "ecartes": sum(1 for i in items if i.excluded),
         "deja_presents": sum(1 for i in items if i.already_in_library),
-        "dates_a_ecrire": sum(1 for i in active if i.date and not i.date_reliable and i.date_source != DATE_FILE),
+        "dates_a_ecrire": sum(1 for g in groups for i in g.active_items if i.target and not i.date_reliable
+                              and (g.manual_date or (i.date_source in (DATE_FILENAME, DATE_FOLDER)
+                                                     and i.date_precision in ("jour", "heure")))),
     }

@@ -1,6 +1,5 @@
 """Classement complet d'un jeu de photos d'essai (nécessite ExifTool)."""
-import shutil
-import subprocess
+import re
 import sys
 from pathlib import Path
 
@@ -64,8 +63,11 @@ def test_copy_classification(samples):
     assert "2001/07 - Juillet/2001-07-11 - Cheverny/2001-07-11.jpg" in out           # date du dossier
     assert "2003/05 - Mai/2003-05-01 - Mariage Sophie/2003-05-01.jpg" in out          # date du scanner ignorée
     assert "1985/1985 - Noël chez Mamie/1985.jpg" in out                              # année seule
-    assert "2019/08 - Août/2019-08-12 Cheverny/2019-08-12_14h32_Cheverny.jpg" in out  # EXIF + GPS
-    assert any(p.endswith("Saint-Martin-de-Belleville.xmp") for p in out)            # fichier associé
+    # EXIF + GPS (le nom exact de la commune dépend de la base des lieux)
+    assert any(re.fullmatch(r"2019/08 - Août/2019-08-12 [^/]+/2019-08-12_14h32_[^/]+\.jpg", p) for p in out)
+    # le fichier .xmp suit la photo et prend le même nom
+    xmp = [p for p in out if p.endswith(".xmp")]
+    assert len(xmp) == 1 and xmp[0][:-4] + ".jpg" in out and "2001-07-01_11h00" in xmp[0]
     assert "_Sans date/Scans/Divers/inconnue.jpg" in out
     # les copies de la même photo ne sont pas recopiées
     assert not any("WhatsApp" in p or "Copie de" in p for p in out)
