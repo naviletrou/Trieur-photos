@@ -1,0 +1,403 @@
+"""Détection des doublons.
+
+Trois niveaux :
+  * « Identiques »   : exactement le même fichier (même empreinte SHA-1), quel que soit son nom ;
+  * « Même photo »   : la même image redimensionnée ou recompressée (empreinte visuelle quasi égale) ;
+  * « Très proches » : photos presque identiques prises à moins de 2 minutes d'intervalle (rafales).
+Les deux premiers niveaux proposent d'écarter les copies ; le troisième est seulement signalé.
+
+Les empreintes sont gardées dans un cache pour que les analyses suivantes soient rapides.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+
+from .model import RAW_EXT, VIDEO_EXT, MediaItem, PHOTO_EXT
+from .settings import cache_dir
+
+IDENTICAL = "Identiques"
+SAME_PHOTO = "Même photo"
+SIMILAR = "Très proches"
+
+SAME_PHOTO_MAX = 6      # différences tolérées sur 128 bits pour « même photo »
+SIMILAR_MAX = 22        # pour « très proches »
+SIMILAR_SECONDS = 120   # écart de temps maximal pour « très proches »
+
+Progress = Callable[[str, int, int], None]
+Cancelled = Callable[[], bool]
+
+try:
+    from PIL import Image, ImageOps
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+except ImportError:  # pragma: no cover
+    Image = None
+
+
+@dataclass
+class DuplicateGroup:
+    kind: str
+    items: list[MediaItem]
+    keep: MediaItem
+    library_matches: list[Path] = field(default_factory=list)  # déjà présents dans la destination
+
+
+class HashCache:
+    """Empreintes déjà calculées, retrouvées par chemin, taille et date de modification."""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or cache_dir() / "empreintes.sqlite"
+        self.lock = threading.Lock()
+        self.db = sqlite3.connect(str(self.path), check_same_thread=False)
+        self.db.execute("CREATE TABLE IF NOT EXISTS h (path TEXT PRIMARY KEY, size INTEGER, mtime REAL, "
+                        "sha1 TEXT, dhash TEXT)")
+
+    def get(self, path: Path, size: int, mtime: float) -> tuple[str, int | None] | None:
+        with self.lock:
+            row = self.db.execute("SELECT size, mtime, sha1, dhash FROM h WHERE path=?", (str(path),)).fetchone()
+        if row and row[0] == size and abs(row[1] - mtime) < 0.01:
+            return row[2] or "", (int(row[3], 16) if row[3] else None)
+        return None
+
+    def put(self, path: Path, size: int, mtime: float, sha1: str, dhash: int | None):
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO h VALUES (?,?,?,?,?)",
+                            (str(path), size, mtime, sha1, f"{dhash:032x}" if dhash is not None else None))
+
+    def commit(self):
+        with self.lock:
+            self.db.commit()
+
+    def close(self):
+        self.commit()
+        self.db.close()
+
+
+def sha1_of(path: Path) -> str:
+    digest = hashlib.sha1()
+    with open(path, "rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def dhash_of(path: Path) -> int | None:
+    """Empreinte visuelle de 128 bits (différences horizontales et verticales)."""
+    if Image is None or path.suffix.lower() in RAW_EXT or path.suffix.lower() in VIDEO_EXT:
+        return None
+    try:
+        with Image.open(path) as image:
+            image.draft("L", (128, 128))  # décodage JPEG à taille réduite : bien plus rapide
+            image = ImageOps.exif_transpose(image).convert("L")
+            horizontal = np.asarray(image.resize((9, 8), Image.LANCZOS), dtype=np.int16)
+            vertical = np.asarray(image.resize((8, 9), Image.LANCZOS), dtype=np.int16)
+    except Exception:
+        return None
+    bits = np.concatenate([(horizontal[:, 1:] > horizontal[:, :-1]).ravel(),
+                           (vertical[1:, :] > vertical[:-1, :]).ravel()])
+    value = 0
+    for bit in bits:
+        value = (value << 1) | int(bit)
+    return value
+
+
+def _split(value: int) -> tuple[int, int]:
+    return (value >> 64) & 0xFFFFFFFFFFFFFFFF, value & 0xFFFFFFFFFFFFFFFF
+
+
+def _score(item: MediaItem) -> tuple:
+    """La meilleure version d'une photo : la plus grande, avec sa date d'origine, le plus gros fichier."""
+    return (item.pixels, item.date_reliable, item.size, -len(str(item.path)))
+
+
+class _UnionFind:
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+
+    def find(self, a: int) -> int:
+        while self.parent[a] != a:
+            self.parent[a] = self.parent[self.parent[a]]
+            a = self.parent[a]
+        return a
+
+    def union(self, a: int, b: int):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[rb] = ra
+
+
+def library_files(destination: Path, sizes: set[int], cancelled: Cancelled | None = None) -> list[tuple[Path, int, float]]:
+    """Fichiers déjà présents dans la destination dont la taille correspond à une photo à classer."""
+    found = []
+    if not destination or not destination.exists():
+        return found
+    for root, dirs, files in os.walk(destination):
+        if cancelled and cancelled():
+            break
+        dirs[:] = [d for d in dirs if d.lower() not in ("_doublons", "_journal") and not d.startswith(".")]
+        for name in files:
+            if os.path.splitext(name)[1].lower() not in PHOTO_EXT | VIDEO_EXT:
+                continue
+            path = Path(root) / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_size in sizes:
+                found.append((path, stat.st_size, stat.st_mtime))
+    return found
+
+
+def find_duplicates(items: list[MediaItem], destination: Path | None = None, similar: bool = True,
+                    progress: Progress | None = None, cancelled: Cancelled | None = None,
+                    cache: HashCache | None = None) -> list[DuplicateGroup]:
+    own_cache = cache is None
+    cache = cache or HashCache()
+    try:
+        return _find(items, destination, similar, progress, cancelled, cache)
+    finally:
+        if own_cache:
+            cache.close()
+        else:
+            cache.commit()
+
+
+def _find(items, destination, similar, progress, cancelled, cache) -> list[DuplicateGroup]:
+    def step(label, done, total):
+        if progress:
+            progress(label, done, total)
+
+    # 1. empreintes SHA-1 : seulement pour les fichiers de même taille (les autres ne peuvent être identiques)
+    by_size: dict[int, list[MediaItem]] = {}
+    for item in items:
+        by_size.setdefault(item.size, []).append(item)
+    library = library_files(destination, set(by_size), cancelled) if destination else []
+    library_by_size: dict[int, list[tuple[Path, int, float]]] = {}
+    for entry in library:
+        library_by_size.setdefault(entry[1], []).append(entry)
+
+    need_sha = [i for i in items if len(by_size[i.size]) > 1 or i.size in library_by_size]
+    # 2. empreintes visuelles : toutes les photos
+    need_visual = [i for i in items if not i.is_video and i.path.suffix.lower() not in RAW_EXT]
+    work = {id(i): i for i in need_sha + need_visual}
+    sha_ids = {id(i) for i in need_sha}
+    visual_ids = {id(i) for i in need_visual}
+
+    total = len(work)
+    done = 0
+    lock = threading.Lock()
+
+    def compute(item: MediaItem):
+        nonlocal done
+        if cancelled and cancelled():
+            return
+        cached = cache.get(item.path, item.size, item.mtime)
+        sha, dh = (cached if cached else ("", None))
+        changed = False
+        if id(item) in sha_ids and not sha:
+            try:
+                sha = sha1_of(item.path)
+                changed = True
+            except OSError:
+                sha = ""
+        if id(item) in visual_ids and dh is None:
+            dh = dhash_of(item.path)
+            changed = changed or dh is not None
+        item.sha1, item.dhash = sha, dh
+        if changed:
+            cache.put(item.path, item.size, item.mtime, sha, dh)
+        with lock:
+            done += 1
+            if done % 25 == 0 or done == total:
+                step("Recherche des doublons", done, total)
+
+    with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 2) + 2)) as pool:
+        list(pool.map(compute, work.values()))
+    cache.commit()
+    if cancelled and cancelled():
+        return []
+
+    groups: list[DuplicateGroup] = []
+    grouped: set[int] = set()
+
+    # identiques entre eux
+    by_sha: dict[str, list[MediaItem]] = {}
+    for item in items:
+        if item.sha1:
+            by_sha.setdefault(item.sha1, []).append(item)
+
+    # identiques à une photo déjà dans la destination
+    library_sha: dict[str, list[Path]] = {}
+    for size, entries in library_by_size.items():
+        if not any(i.sha1 for i in by_size.get(size, [])):
+            continue
+        for path, fsize, mtime in entries:
+            cached = cache.get(path, fsize, mtime)
+            sha = cached[0] if cached and cached[0] else ""
+            if not sha:
+                try:
+                    sha = sha1_of(path)
+                    cache.put(path, fsize, mtime, sha, cached[1] if cached else None)
+                except OSError:
+                    continue
+            library_sha.setdefault(sha, []).append(path)
+    cache.commit()
+
+    for sha, members in by_sha.items():
+        matches = library_sha.get(sha, [])
+        # un fichier déjà à sa place dans la destination (dossier source = destination) n'est pas un doublon de lui-même
+        matches = [m for m in matches if all(os.path.normcase(str(m)) != os.path.normcase(str(i.path)) for i in members)]
+        if len(members) > 1 or matches:
+            keep = max(members, key=_score)
+            groups.append(DuplicateGroup(IDENTICAL, sorted(members, key=lambda i: str(i.path)), keep, matches))
+            grouped.update(id(i) for i in members)
+
+    # même photo / très proches : comparaison des empreintes visuelles
+    candidates = [i for i in items if i.dhash is not None]
+    if len(candidates) > 1:
+        high = np.array([_split(i.dhash)[0] for i in candidates], dtype=np.uint64)
+        low = np.array([_split(i.dhash)[1] for i in candidates], dtype=np.uint64)
+        stamps = np.array([i.date.timestamp() if i.date and i.date_reliable else np.nan for i in candidates])
+        same = _UnionFind(len(candidates))
+        close = _UnionFind(len(candidates))
+        n = len(candidates)
+        for a in range(n - 1):
+            if cancelled and cancelled():
+                return []
+            dist = np.bitwise_count(high[a + 1:] ^ high[a]).astype(np.int32) + \
+                np.bitwise_count(low[a + 1:] ^ low[a]).astype(np.int32)
+            for b in np.nonzero(dist <= SAME_PHOTO_MAX)[0]:
+                same.union(a, a + 1 + int(b))
+            if similar and not np.isnan(stamps[a]):
+                near = (dist <= SIMILAR_MAX) & (np.abs(stamps[a + 1:] - stamps[a]) <= SIMILAR_SECONDS)
+                for b in np.nonzero(near)[0]:
+                    close.union(a, a + 1 + int(b))
+            if a % 500 == 0:
+                step("Comparaison des images", a, n)
+
+        def collect(uf: _UnionFind) -> list[list[MediaItem]]:
+            sets: dict[int, list[MediaItem]] = {}
+            for idx, item in enumerate(candidates):
+                sets.setdefault(uf.find(idx), []).append(item)
+            return [members for members in sets.values() if len(members) > 1]
+
+        for members in collect(same):
+            # les fichiers identiques sont déjà traités : on ne garde que les groupes qui apportent du nouveau
+            distinct = {i.sha1 or id(i) for i in members}
+            if len(distinct) < 2:
+                continue
+            # deux prises de vue d'heures différentes ne sont pas la même photo (rafale) : seulement signalées
+            shots = {i.date.replace(microsecond=0) for i in members if i.date and i.date_reliable}
+            if len(shots) > 1:
+                if similar:
+                    keep = max(members, key=_score)
+                    groups.append(DuplicateGroup(SIMILAR, sorted(members, key=lambda i: i.date or datetime.min), keep))
+                    grouped.update(id(i) for i in members)
+                continue
+            keep = max(members, key=_score)
+            ids = {id(i) for i in members}
+            # un groupe « identiques » entièrement compris dans celui-ci y est fusionné
+            library_matches = []
+            for other in [g for g in groups if g.kind == IDENTICAL and {id(i) for i in g.items} <= ids]:
+                library_matches += other.library_matches
+                groups.remove(other)
+            groups.append(DuplicateGroup(SAME_PHOTO, sorted(members, key=lambda i: str(i.path)), keep, library_matches))
+            grouped.update(ids)
+        if similar:
+            for members in collect(close):
+                if all(id(i) in grouped for i in members):
+                    continue
+                keep = max(members, key=_score)
+                groups.append(DuplicateGroup(SIMILAR, sorted(members, key=lambda i: i.date or datetime.min), keep))
+        step("Comparaison des images", n, n)
+
+    order = {IDENTICAL: 0, SAME_PHOTO: 1, SIMILAR: 2}
+    groups.sort(key=lambda g: (order[g.kind], str(g.keep.path)))
+    return groups
+
+
+def apply_default_choices(groups: list[DuplicateGroup]):
+    """Choix proposés : écarter les copies identiques et les versions moins bonnes d'une même photo."""
+    for group in groups:
+        if group.kind in (IDENTICAL, SAME_PHOTO):
+            for item in group.items:
+                if item is not group.keep:
+                    item.excluded = True
+                    item.duplicate_of = group.keep.path
+            if group.library_matches:
+                # la photo est déjà rangée dans la destination : inutile de la reclasser
+                group.keep.already_in_library = group.library_matches[0]
+
+
+def find_already_sorted(groups, exiftool=None, cache: HashCache | None = None,
+                        cancelled: Cancelled | None = None) -> int:
+    """Photos déjà rangées par un classement précédent dans leur dossier de destination.
+
+    Après un premier classement, la date écrite dans les scans change leur empreinte SHA-1 :
+    on les reconnaît alors à leur empreinte visuelle, dans le dossier où elles doivent aller,
+    à condition que la date de prise de vue soit la même.
+    Renvoie le nombre de photos reconnues (marquées already_in_library).
+    """
+    from .exiftool import parse_date
+    own_cache = cache is None
+    cache = cache or HashCache()
+    found = 0
+    try:
+        for group in groups:
+            if cancelled and cancelled():
+                break
+            folder = group.target_dir
+            if not folder or not folder.is_dir():
+                continue
+            candidates = [i for i in group.items if not i.excluded and not i.already_in_library and i.dhash is not None]
+            if not candidates:
+                continue
+            existing = []
+            for path in folder.iterdir():
+                if path.suffix.lower() not in PHOTO_EXT or path.suffix.lower() in RAW_EXT or not path.is_file():
+                    continue
+                stat = path.stat()
+                cached = cache.get(path, stat.st_size, stat.st_mtime)
+                dh = cached[1] if cached and cached[1] is not None else dhash_of(path)
+                if dh is not None and not (cached and cached[1] is not None):
+                    cache.put(path, stat.st_size, stat.st_mtime, cached[0] if cached else "", dh)
+                if dh is not None:
+                    existing.append((path, dh))
+            if not existing:
+                continue
+            dates = {}
+            if exiftool:
+                meta = exiftool.read([p for p, _ in existing])
+                for p, _ in existing:
+                    entry = meta.get(os.path.normcase(os.path.normpath(str(p)))) or {}
+                    dates[str(p)] = parse_date(entry.get("DateTimeOriginal")) or parse_date(entry.get("CreateDate"))
+            for item in candidates:
+                for path, dh in existing:
+                    distance = bin(item.dhash ^ dh).count("1")
+                    if distance > SAME_PHOTO_MAX:
+                        continue
+                    other = dates.get(str(path))
+                    if item.date and other and item.date.replace(microsecond=0) != other and item.date_reliable:
+                        continue  # autre prise de vue d'une rafale
+                    item.already_in_library = path
+                    found += 1
+                    break
+    finally:
+        if own_cache:
+            cache.close()
+        else:
+            cache.commit()
+    return found
