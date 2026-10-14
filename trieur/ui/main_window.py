@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QMainWindow, QMessageBo
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import __version__, analyze
+from ..log import error_text, log_file, logger
 from ..exiftool import ExifToolError, find_exiftool
 from ..places import get_index
 from ..settings import Settings
@@ -129,28 +130,42 @@ class MainWindow(QMainWindow):
             dialog.setWindowModality(Qt.WindowModal)
             dialog.setMinimumWidth(460)
             dialog.setMinimumDuration(0)
+            # sinon la fenêtre disparaît dès qu'une étape atteint 100 %, alors que l'analyse continue
+            dialog.setAutoReset(False)
+            dialog.setAutoClose(False)
             dialog.canceled.connect(worker.cancel)
 
             def progress(text, done, total):
-                dialog.setLabelText(f"{text}…" + (f"  {done:,} / {total:,}".replace(",", " ") if total else
-                                                   (f"  {done:,}".replace(",", " ") if done else "")))
-                dialog.setMaximum(total or 0)
+                count = (f"{done:,} / {total:,}" if total else (f"{done:,}" if done else "")).replace(",", " ")
+                dialog.setLabelText(f"{text}…\n{count}" if count else f"{text}…")
                 if total:
+                    dialog.setRange(0, total)
                     dialog.setValue(min(done, total))
+                else:
+                    dialog.setRange(0, 0)  # durée inconnue : barre animée
+                if not dialog.isVisible():
+                    dialog.show()
             worker.progress.connect(progress)
         else:
             worker.progress.connect(self.run.show_progress)
 
-        def finished(result):
+        def close_dialog():
             if dialog:
-                dialog.reset()
-                dialog.close()
-            on_done(result)
+                dialog.canceled.disconnect(worker.cancel)
+                dialog.hide()
+                dialog.deleteLater()
+
+        def finished(result):
+            close_dialog()
+            try:
+                on_done(result)
+            except Exception as error:
+                logger.error("Erreur après « %s » :\n%s", title, error_text(error))
+                self.show_error(f"{error.__class__.__name__} : {error}", error_text(error))
 
         def failed(message):
-            if dialog:
-                dialog.close()
-            QMessageBox.critical(self, "Erreur", message)
+            close_dialog()
+            self.show_error(message)
 
         worker.done.connect(finished)
         worker.failed.connect(failed)
@@ -163,7 +178,8 @@ class MainWindow(QMainWindow):
 
     def analysis_done(self, analysis):
         if analysis is None:
-            return  # arrêtée par l'utilisateur
+            QMessageBox.information(self, "Analyse", "Analyse arrêtée.")
+            return
         if not analysis.items:
             QMessageBox.information(self, "Analyse", "Aucune photo ni vidéo trouvée dans ce dossier.")
             return
@@ -220,6 +236,20 @@ class MainWindow(QMainWindow):
 
     # -- divers ------------------------------------------------------------------------------
 
+    def show_error(self, message: str, details: str = ""):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Critical)
+        box.setWindowTitle("Erreur")
+        box.setText(message)
+        box.setInformativeText(f"Le détail est enregistré dans le journal technique :\n{log_file()}")
+        if details:
+            box.setDetailedText(details)
+        box.exec()
+
+    def open_log(self):
+        from .page_run import open_folder
+        open_folder(log_file().parent)
+
     def check_tools(self):
         try:
             find_exiftool()
@@ -234,7 +264,8 @@ class MainWindow(QMainWindow):
                           f"Base des lieux : {places}.<br>"
                           "Lieux : © GeoNames (geonames.org), licence CC BY 4.0.<br>"
                           "Métadonnées : ExifTool de Phil Harvey (exiftool.org).<br>"
-                          "Interface : Qt for Python (PySide6), licence LGPL.")
+                          "Interface : Qt for Python (PySide6), licence LGPL.<br><br>"
+                          f"Journal technique : {log_file()}")
 
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():

@@ -199,7 +199,12 @@ def resolve_item(item: MediaItem, settings: Settings, index: PlaceIndex | None):
                     item.date, item.date_source, item.date_precision = found.when, DATE_FOLDER, found.precision
                     break
         if item.date is None and settings.use_file_date:
-            item.date, item.date_source, item.date_precision = datetime.fromtimestamp(item.mtime), DATE_FILE, "jour"
+            try:
+                when = datetime.fromtimestamp(item.mtime)
+            except (OSError, OverflowError, ValueError):  # date de fichier aberrante
+                when = None
+            if when and 1990 <= when.year <= datetime.now().year + 1:
+                item.date, item.date_source, item.date_precision = when, DATE_FILE, "jour"
     if item.date is None:
         item.date_source = "Aucune"
 

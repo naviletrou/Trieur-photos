@@ -139,15 +139,20 @@ class _UnionFind:
             self.parent[rb] = ra
 
 
-def library_files(destination: Path, sizes: set[int], cancelled: Cancelled | None = None) -> list[tuple[Path, int, float]]:
+def library_files(destination: Path, sizes: set[int], cancelled: Cancelled | None = None,
+                  progress: Progress | None = None) -> list[tuple[Path, int, float]]:
     """Fichiers déjà présents dans la destination dont la taille correspond à une photo à classer."""
     found = []
+    seen = 0
     if not destination or not destination.exists():
         return found
     for root, dirs, files in os.walk(destination):
         if cancelled and cancelled():
             break
         dirs[:] = [d for d in dirs if d.lower() not in ("_doublons", "_journal") and not d.startswith(".")]
+        seen += len(files)
+        if progress:
+            progress("Inventaire de la destination", seen, 0)
         for name in files:
             if os.path.splitext(name)[1].lower() not in PHOTO_EXT | VIDEO_EXT:
                 continue
@@ -184,7 +189,7 @@ def _find(items, destination, similar, progress, cancelled, cache) -> list[Dupli
     by_size: dict[int, list[MediaItem]] = {}
     for item in items:
         by_size.setdefault(item.size, []).append(item)
-    library = library_files(destination, set(by_size), cancelled) if destination else []
+    library = library_files(destination, set(by_size), cancelled, progress) if destination else []
     library_by_size: dict[int, list[tuple[Path, int, float]]] = {}
     for entry in library:
         library_by_size.setdefault(entry[1], []).append(entry)
@@ -270,7 +275,10 @@ def _find(items, destination, similar, progress, cancelled, cache) -> list[Dupli
     if len(candidates) > 1:
         high = np.array([_split(i.dhash)[0] for i in candidates], dtype=np.uint64)
         low = np.array([_split(i.dhash)[1] for i in candidates], dtype=np.uint64)
-        stamps = np.array([i.date.timestamp() if i.date and i.date_reliable else np.nan for i in candidates])
+        # (date - 1970) plutôt que timestamp() : sous Windows, timestamp() échoue avant 1970
+        epoch = datetime(1970, 1, 1)
+        stamps = np.array([(i.date - epoch).total_seconds() if i.date and i.date_reliable else np.nan
+                           for i in candidates])
         same = _UnionFind(len(candidates))
         close = _UnionFind(len(candidates))
         n = len(candidates)
@@ -343,7 +351,7 @@ def apply_default_choices(groups: list[DuplicateGroup]):
 
 
 def find_already_sorted(groups, exiftool=None, cache: HashCache | None = None,
-                        cancelled: Cancelled | None = None) -> int:
+                        cancelled: Cancelled | None = None, progress: Progress | None = None) -> int:
     """Photos déjà rangées par un classement précédent dans leur dossier de destination.
 
     Après un premier classement, la date écrite dans les scans change leur empreinte SHA-1 :
@@ -356,9 +364,11 @@ def find_already_sorted(groups, exiftool=None, cache: HashCache | None = None,
     cache = cache or HashCache()
     found = 0
     try:
-        for group in groups:
+        for number, group in enumerate(groups, start=1):
             if cancelled and cancelled():
                 break
+            if progress and (number % 20 == 0 or number == len(groups)):
+                progress("Recherche des photos déjà rangées", number, len(groups))
             folder = group.target_dir
             if not folder or not folder.is_dir():
                 continue

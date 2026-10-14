@@ -6,8 +6,11 @@ def main():
     from PySide6.QtCore import QLocale, QTranslator, QLibraryInfo
     from PySide6.QtWidgets import QApplication
 
+    from . import log
     from .ui.main_window import MainWindow
     from .ui.style import STYLE
+
+    log.setup()
 
     app = QApplication(sys.argv)
     app.setApplicationName("Trieur de photos")
@@ -26,6 +29,7 @@ def main():
             app.setWindowIcon(QIcon(str(base / "icone.png")))
             break
     window = MainWindow()
+    log.install_excepthook(window.show_error)
     window.show()
     return app.exec()
 
