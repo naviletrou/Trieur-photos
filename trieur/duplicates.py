@@ -64,7 +64,12 @@ class HashCache:
     def __init__(self, path: Path | None = None):
         self.path = path or cache_dir() / "empreintes.sqlite"
         self.lock = threading.Lock()
-        self.db = sqlite3.connect(str(self.path), check_same_thread=False)
+        # timeout : une autre fenêtre du programme peut utiliser le cache au même moment
+        self.db = sqlite3.connect(str(self.path), check_same_thread=False, timeout=30)
+        try:
+            self.db.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            pass
         self.db.execute("CREATE TABLE IF NOT EXISTS h (path TEXT PRIMARY KEY, size INTEGER, mtime REAL, "
                         "sha1 TEXT, dhash TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS infos (path TEXT PRIMARY KEY, size INTEGER, mtime REAL, "
@@ -78,9 +83,13 @@ class HashCache:
         return None
 
     def put(self, path: Path, size: int, mtime: float, sha1: str, dhash: int | None):
+        # le cache ne fait que gagner du temps : une erreur d'écriture ne doit jamais arrêter la recherche
         with self.lock:
-            self.db.execute("INSERT OR REPLACE INTO h VALUES (?,?,?,?,?)",
-                            (str(path), size, mtime, sha1, f"{dhash:032x}" if dhash is not None else None))
+            try:
+                self.db.execute("INSERT OR REPLACE INTO h VALUES (?,?,?,?,?)",
+                                (str(path), size, mtime, sha1, f"{dhash:032x}" if dhash is not None else None))
+            except sqlite3.Error as error:
+                logger.warning("  cache des empreintes indisponible (%s)", error)
 
     def get_info(self, path: Path, size: int, mtime: float) -> tuple[int, int, datetime | None] | None:
         with self.lock:
@@ -92,22 +101,38 @@ class HashCache:
 
     def put_info(self, path: Path, size: int, mtime: float, width: int, height: int, taken: datetime | None):
         with self.lock:
-            self.db.execute("INSERT OR REPLACE INTO infos VALUES (?,?,?,?,?,?)",
-                            (str(path), size, mtime, width, height, taken.isoformat() if taken else None))
+            try:
+                self.db.execute("INSERT OR REPLACE INTO infos VALUES (?,?,?,?,?,?)",
+                                (str(path), size, mtime, width, height, taken.isoformat() if taken else None))
+            except sqlite3.Error as error:
+                logger.warning("  cache des empreintes indisponible (%s)", error)
 
     def commit(self):
         with self.lock:
-            self.db.commit()
+            try:
+                self.db.commit()
+            except sqlite3.Error as error:
+                logger.warning("  enregistrement du cache des empreintes impossible (%s)", error)
 
     def close(self):
         self.commit()
-        self.db.close()
+        try:
+            self.db.close()
+        except sqlite3.Error:
+            pass
 
 
-def sha1_of(path: Path) -> str:
+class Cancelled_(Exception):
+    """Lecture interrompue par « Arrêter »."""
+
+
+def sha1_of(path: Path, cancelled: Cancelled | None = None) -> str:
     digest = hashlib.sha1()
     with open(path, "rb") as handle:
         while chunk := handle.read(1024 * 1024):
+            if cancelled and cancelled():
+                # une grosse vidéo sur le NAS peut prendre longtemps : on s'arrête tout de suite
+                raise Cancelled_()
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -296,7 +321,7 @@ def _find(items, destination, similar, progress, cancelled, cache, preferred=Non
         changed = False
         if id(item) in sha_ids and not sha:
             try:
-                sha = sha1_of(item.path)
+                sha = sha1_of(item.path, cancelled)
                 changed = True
             except OSError:
                 sha = ""
@@ -334,6 +359,8 @@ def _find(items, destination, similar, progress, cancelled, cache, preferred=Non
         # une photo illisible ne doit jamais arrêter toute la recherche
         try:
             compute(item)
+        except Cancelled_:
+            pass
         except Exception as error:
             logger.warning("  fichier ignoré (%s) : %s", error, item.path)
 

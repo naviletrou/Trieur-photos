@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QMainWindow, QMessageBox, QProgressDialog, QPushButton,
+from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QMainWindow, QMessageBox, QProgressDialog, QPushButton,
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import __version__, analyze
@@ -134,7 +134,35 @@ class MainWindow(QMainWindow):
 
     # -- travaux en arrière-plan -------------------------------------------------------------
 
+    def previous_work_finished(self) -> bool:
+        """Attend la fin d'un travail précédent : deux recherches en même temps saturent le NAS."""
+        previous = self.worker
+        if previous is None or not previous.isRunning():
+            return True
+        previous.cancel()
+        waiting = QProgressDialog("Arrêt du travail précédent en cours…\n(fin de la lecture des fichiers ouverts)",
+                                  None, 0, 0, self)
+        waiting.setWindowTitle("Trieur de photos")
+        waiting.setWindowModality(Qt.WindowModal)
+        waiting.setMinimumWidth(460)
+        waiting.setMinimumDuration(0)
+        waiting.show()
+        while previous.isRunning():
+            QApplication.processEvents()
+            previous.wait(100)
+        waiting.hide()
+        waiting.deleteLater()
+        return True
+
+    def closeEvent(self, event):
+        # ne pas laisser une recherche tourner sans fenêtre (elle continuerait à lire le NAS)
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(15000)
+        super().closeEvent(event)
+
     def run_worker(self, worker, title: str, on_done, modal: bool = True):
+        self.previous_work_finished()
         self.worker = worker
         dialog = None
         if modal:
@@ -146,11 +174,24 @@ class MainWindow(QMainWindow):
             # sinon la fenêtre disparaît dès qu'une étape atteint 100 %, alors que l'analyse continue
             dialog.setAutoReset(False)
             dialog.setAutoClose(False)
-            dialog.canceled.connect(worker.cancel)
 
-            state = {"text": "", "count": "", "detail": ""}
+            def stop():
+                # la fenêtre reste affichée jusqu'à l'arrêt réel : on ne peut pas relancer entre-temps
+                worker.cancel()
+                state["stopping"] = True
+                dialog.setCancelButtonText("Arrêt en cours…")
+                cancel_button = dialog.findChild(QPushButton)
+                if cancel_button:
+                    cancel_button.setEnabled(False)
+                dialog.setLabelText("Arrêt en cours…\n(fin de la lecture des fichiers ouverts)")
+                dialog.show()
+            dialog.canceled.connect(stop)
+
+            state = {"text": "", "count": "", "detail": "", "stopping": False}
 
             def refresh_label():
+                if state["stopping"]:
+                    return
                 lines = [f"{state['text']}…"]
                 if state["count"]:
                     lines.append(state["count"])
@@ -183,7 +224,10 @@ class MainWindow(QMainWindow):
 
         def close_dialog():
             if dialog:
-                dialog.canceled.disconnect(worker.cancel)
+                try:
+                    dialog.canceled.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
                 dialog.hide()
                 dialog.deleteLater()
 
