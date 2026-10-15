@@ -239,3 +239,59 @@ def undo(journal_path: Path, progress: Progress | None = None) -> Result:
     except OSError:
         pass
     return result
+
+
+def execute_duplicates(items: list[MediaItem], library: Path, progress: Progress | None = None,
+                       cancelled: Cancelled | None = None) -> Result:
+    """Mode « Doublons seuls » : met de côté les doublons écartés dans « _Doublons » de la photothèque.
+
+    Le chemin d'origine est conservé sous _Doublons/<date>/ pour savoir d'où vient chaque fichier.
+    Rien n'est supprimé, et le journal permet de tout remettre en place.
+    """
+    stamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
+    result = Result(journal=library / JOURNAL_DIR / f"doublons_{stamp}.csv")
+    journal = Journal(result.journal)
+    journal.write("debut", library, "", "", "mode=doublons")
+    aside_root = library / DUPLICATES_DIR / stamp
+    work = [i for i in items if i.excluded and i.duplicate_of]
+    try:
+        for done, item in enumerate(work, start=1):
+            if cancelled and cancelled():
+                result.cancelled = True
+                break
+            if progress and (done % 10 == 0 or done == len(work)):
+                progress("Mise de côté des doublons", done, len(work))
+            try:
+                aside = _free_path(aside_root / item.relative)
+                aside.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(item.path), str(aside))
+                journal.write(DUPLICATE_OP, item.path, aside, item.size, f"doublon de {item.duplicate_of}")
+                for companion in item.companions:
+                    if companion.exists():
+                        c_aside = _free_path(aside.parent / companion.name)
+                        shutil.move(str(companion), str(c_aside))
+                        journal.write(DUPLICATE_OP, companion, c_aside, "", "fichier associé")
+                result.duplicates_moved += 1
+            except Exception as error:
+                result.errors.append(f"{item.path} : {error}")
+                journal.write("erreur", item.path, "", "", str(error))
+    finally:
+        journal.write("fin", "", "", "", f"erreurs={len(result.errors)}")
+        journal.close()
+    return result
+
+
+def write_report(groups, path: Path):
+    """Liste des doublons au format CSV (s'ouvre dans Excel)."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(["groupe", "type", "décision", "fichier", "dossier", "taille (octets)",
+                         "largeur", "hauteur", "date de prise de vue"])
+        for number, group in enumerate(groups, start=1):
+            for item in group.items:
+                decision = "garder" if not item.excluded else "écarter"
+                if item is group.keep:
+                    decision += " (meilleure version)"
+                writer.writerow([number, group.kind, decision, item.name, str(item.path.parent), item.size,
+                                 item.width or "", item.height or "",
+                                 item.date.strftime("%d/%m/%Y %H:%M") if item.date and item.date_reliable else ""])

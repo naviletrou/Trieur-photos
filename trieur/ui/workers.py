@@ -12,7 +12,7 @@ from ..duplicates import HashCache, apply_default_choices, find_already_sorted, 
 from ..exiftool import ExifTool
 from ..log import error_text, logger
 from ..places import get_index
-from ..settings import Settings
+from ..settings import TASK_DUPLICATES, Settings
 
 
 class Worker(QThread):
@@ -114,6 +114,35 @@ class AnalysisWorker(Worker):
         return Analysis(s, items, groups, duplicates)
 
 
+class DuplicatesOnlyWorker(Worker):
+    """Mode « Doublons seuls » : aucune lecture ExifTool, une seule lecture de chaque photo."""
+
+    def __init__(self, settings: Settings):
+        super().__init__()
+        self.settings = settings
+
+    def work(self) -> Analysis | None:
+        s = self.settings
+        logger.info("Doublons seuls : %s · dossier préféré : %s", s.source, s.preferred_folder or "-")
+        self.report("Recherche des fichiers", 0, 0)
+        items = analyze.scan(s, self.report, self.cancelled)
+        logger.info("  %d fichiers trouvés", len(items))
+        if self.cancelled():
+            return None
+        preferred = Path(s.preferred_folder) if s.preferred_folder else None
+        cache = HashCache()
+        try:
+            duplicates = find_duplicates(items, None, s.similar_photos, self.report, self.cancelled, cache,
+                                         preferred=preferred)
+        finally:
+            cache.close()
+        if self.cancelled():
+            return None
+        apply_default_choices(duplicates)
+        logger.info("  %d groupes de doublons", len(duplicates))
+        return Analysis(s, items, [], duplicates)
+
+
 class ExecuteWorker(Worker):
     def __init__(self, analysis: Analysis):
         super().__init__()
@@ -121,6 +150,8 @@ class ExecuteWorker(Worker):
 
     def work(self):
         s = self.analysis.settings
+        if s.task == TASK_DUPLICATES:
+            return executor.execute_duplicates(self.analysis.items, Path(s.source), self.report, self.cancelled)
         self.report("Préparation", 0, 0)
         analyze.plan(self.analysis.groups, s, check_disk=True)
         with ExifTool() as et:

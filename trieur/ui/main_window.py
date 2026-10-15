@@ -12,14 +12,14 @@ from .. import __version__, analyze
 from ..log import error_text, log_file, logger
 from ..exiftool import ExifToolError, find_exiftool
 from ..places import get_index
-from ..settings import Settings
+from ..settings import TASK_DUPLICATES, Settings
 from .page_duplicates import DuplicatesPage
 from .page_folders import FoldersPage
 from .page_review import ReviewPage
 from .page_rules import RulesPage
 from .page_run import RunPage
 from .widgets import label
-from .workers import AnalysisWorker, ExecuteWorker, UndoWorker
+from .workers import AnalysisWorker, DuplicatesOnlyWorker, ExecuteWorker, UndoWorker
 
 STEPS = ["1   Dossiers", "2   Classement", "3   Vérification", "4   Doublons", "5   Lancement"]
 
@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         self.folders.analyse_requested.connect(self.start_analysis)
+        self.folders.task_sort.toggled.connect(self.task_switched)
         self.rules.rules_changed.connect(self.rules_changed)
         self.rules.next_requested.connect(lambda: self.go(2))
         self.review.next_requested.connect(lambda: self.go(3 if self.analysis and self.analysis.duplicates else 4))
@@ -100,14 +101,21 @@ class MainWindow(QMainWindow):
     # -- navigation --------------------------------------------------------------------------
 
     def update_steps(self, current: int):
+        dups = self.settings.task == TASK_DUPLICATES
         for index, button in enumerate(self.step_buttons):
             button.setEnabled(index == 0 or self.analysis is not None)
             button.setChecked(index == current)
+            # mode « Doublons seuls » : ni classement ni vérification, étapes renumérotées
+            button.setVisible(not (dups and index in (1, 2)))
+            number = {3: 2, 4: 3}.get(index, index + 1) if dups else index + 1
+            button.setText(f"{number}   {STEPS[index].split('   ', 1)[1]}")
         self.stack.setCurrentIndex(current)
 
     def go(self, index: int):
         if index > 0 and not self.analysis:
             index = 0
+        if self.settings.task == TASK_DUPLICATES and index in (1, 2):
+            index = 3
         self.update_steps(index)
         page = self.stack.widget(index)
         page.entered()
@@ -116,6 +124,11 @@ class MainWindow(QMainWindow):
         self.run.set_analysis(self.analysis)
 
     def restart(self):
+        self.analysis = None
+        self.update_steps(0)
+
+    def task_switched(self):
+        self.folders.store()
         self.analysis = None
         self.update_steps(0)
 
@@ -174,7 +187,11 @@ class MainWindow(QMainWindow):
             dialog.show()
 
     def start_analysis(self):
-        self.run_worker(AnalysisWorker(self.settings), "Analyse des photos", self.analysis_done)
+        self.analysis = None
+        if self.settings.task == TASK_DUPLICATES:
+            self.run_worker(DuplicatesOnlyWorker(self.settings), "Recherche des doublons", self.analysis_done)
+        else:
+            self.run_worker(AnalysisWorker(self.settings), "Analyse des photos", self.analysis_done)
 
     def analysis_done(self, analysis):
         if analysis is None:
@@ -184,10 +201,13 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Analyse", "Aucune photo ni vidéo trouvée dans ce dossier.")
             return
         self.analysis = analysis
-        self.rules.set_analysis(analysis)
-        self.review.set_analysis(analysis)
         self.duplicates.set_analysis(analysis)
         self.run.set_analysis(analysis)
+        if self.settings.task == TASK_DUPLICATES:
+            self.go(3)
+            return
+        self.rules.set_analysis(analysis)
+        self.review.set_analysis(analysis)
         self.go(1)
 
     def rules_changed(self, needs_resolve: bool):

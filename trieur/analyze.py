@@ -45,17 +45,32 @@ def scan(settings: Settings, progress: Progress | None = None, cancelled: Cancel
         wanted |= VIDEO_EXT
 
     items: list[MediaItem] = []
-    walker = os.walk(source) if settings.recursive else [(str(source), [], os.listdir(source))]
-    for root, dirs, files in walker:
+    pending = [source]
+    while pending:
         if cancelled and cancelled():
             break
-        # ne pas descendre dans les dossiers techniques ni dans la destination
-        dirs[:] = sorted(d for d in dirs
-                         if d.lower() not in SKIP_DIRS and not d.startswith(".")
-                         and not (destination and _norm(Path(root) / d) == destination))
-        if not settings.recursive:
-            files = [f for f in files if (Path(root) / f).is_file()]
-        items.extend(_items_in_folder(Path(root), sorted(files), source, wanted))
+        folder = pending.pop()
+        files: dict[str, os.stat_result] = {}
+        subdirs = []
+        try:
+            # os.scandir donne la taille et les dates avec la liste du dossier : sur un partage réseau
+            # (SMB), cela évite une requête par fichier
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            name = entry.name
+                            if (settings.recursive and name.lower() not in SKIP_DIRS and not name.startswith(".")
+                                    and not (destination and _norm(entry.path) == destination)):
+                                subdirs.append(Path(entry.path))
+                        elif entry.is_file():
+                            files[entry.name] = entry.stat()
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        items.extend(_items_in_folder(Path(folder), dict(sorted(files.items())), source, wanted))
+        pending.extend(sorted(subdirs, reverse=True))
         if progress:
             progress("Recherche des fichiers", len(items), 0)
     return items
@@ -71,7 +86,7 @@ def _media_stem(name: str) -> str:
     return stem.casefold()
 
 
-def _items_in_folder(folder: Path, files: list[str], source: Path, wanted: set[str]) -> list[MediaItem]:
+def _items_in_folder(folder: Path, files: dict[str, os.stat_result], source: Path, wanted: set[str]) -> list[MediaItem]:
     by_stem: dict[str, list[str]] = {}
     for name in files:
         if name.startswith("."):
@@ -103,10 +118,7 @@ def _items_in_folder(folder: Path, files: list[str], source: Path, wanted: set[s
         companions += sidecars
         for i, name in enumerate(primaries):
             path = folder / name
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
+            stat = files[name]
             items.append(MediaItem(
                 path=path,
                 source_root=source,

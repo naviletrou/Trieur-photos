@@ -109,6 +109,7 @@ def is_generic_name(text: str) -> bool:
         return True
     if re.fullmatch(r"\d+[a-z_]*|[a-z_]*\d+|img|dcim|camera|photos?|images?|videos?|scans?|"
                     r"divers|nouveau dossier|new folder|export|download|downloads|telechargements|"
-                    r"whatsapp.*|screenshots?|captures? d'ecran|sans titre|untitled|import.*", plain):
+                    r"whatsapp.*|screenshots?|captures? d'ecran|sans titre|untitled|import.*|a trier|tri|nouveau tri|"
+                    r"vrac|temp|tmp|backup|sauvegardes?|copies?|doublons?|recuperation|recup|old|ancien", plain):
         return True
     return False

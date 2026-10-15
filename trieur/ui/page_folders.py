@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QButtonGroup, QCheckBox, QHBoxLayout, QPushButton, QRadioButton
 
-from ..settings import COPY, MOVE, Settings
+from ..settings import COPY, MOVE, TASK_DUPLICATES, TASK_SORT, Settings
 from .widgets import Card, Page, PathPicker, label
 
 
@@ -20,8 +20,24 @@ class FoldersPage(Page):
                          "Rien n'est modifié avant la dernière étape : vous verrez d'abord le résultat.")
         self.settings = settings
 
+        task = Card("Que voulez-vous faire ?")
+        tasks = QHBoxLayout()
+        self.task_sort = QRadioButton("Classer des photos  (ranger, renommer, dédoublonner)")
+        self.task_dups = QRadioButton("Rechercher les doublons dans ma photothèque  (sans rien reclasser)")
+        task_group = QButtonGroup(self)
+        task_group.addButton(self.task_sort)
+        task_group.addButton(self.task_dups)
+        tasks.addWidget(self.task_sort)
+        tasks.addWidget(self.task_dups)
+        tasks.addStretch(1)
+        task.layout.addLayout(tasks)
+        self.layout.addWidget(task)
+
         source = Card("Photos à ranger", "Le dossier contenant les photos (une carte mémoire, un dossier "
                                          "« À trier », une ancienne archive…).")
+        self.source_card = source
+        self.source_title = source.layout.itemAt(0).widget()
+        self.source_hint = source.layout.itemAt(1).widget()
         self.source = source.add(PathPicker("Dossier à traiter", "Choisir le dossier des photos à ranger"))
         self.recursive = source.add(QCheckBox("Inclure les sous-dossiers"))
         types = QHBoxLayout()
@@ -34,6 +50,7 @@ class FoldersPage(Page):
         self.layout.addWidget(source)
 
         dest = Card("Destination", "Le dossier de votre photothèque, où les photos seront classées.")
+        self.dest_card = dest
         self.destination = dest.add(PathPicker("Dossier de destination", "Choisir le dossier de destination"))
         modes = QHBoxLayout()
         self.copy = QRadioButton("Copier les photos  (les originaux restent intacts — conseillé)")
@@ -52,6 +69,11 @@ class FoldersPage(Page):
         self.dups_dest = dup.add(QCheckBox("Comparer aussi avec les photos déjà présentes dans la destination"))
         self.similar = dup.add(QCheckBox("Signaler les photos presque identiques (rafales)"))
         self.find_dups.toggled.connect(lambda on: (self.dups_dest.setEnabled(on), self.similar.setEnabled(on)))
+        self.preferred_hint = dup.add(label(
+            "Facultatif : un dossier dont les photos sont gardées en priorité quand il existe des copies identiques "
+            "ailleurs. Sinon, le programme garde la copie la mieux rangée (dossier daté ou nommé plutôt que "
+            "« Divers » ou « À trier », nom d'origine plutôt que « Copie de… »).", "hint"))
+        self.preferred = dup.add(PathPicker("Dossier préféré (facultatif)", "Choisir le dossier à privilégier"))
         self.layout.addWidget(dup)
 
         self.message = label("", "warningBox")
@@ -68,12 +90,39 @@ class FoldersPage(Page):
         self.layout.addLayout(bottom)
 
         self.load()
-        for widget in (self.source, self.destination):
+        for widget in (self.source, self.destination, self.preferred):
             widget.changed.connect(self.validate)
+        self.task_sort.toggled.connect(self.task_changed)
+        self.task_changed()
+
+    @property
+    def duplicates_only(self) -> bool:
+        return self.task_dups.isChecked()
+
+    def task_changed(self):
+        dups = self.duplicates_only
+        self.source_title.setText("Photothèque à vérifier" if dups else "Photos à ranger")
+        self.source_hint.setText(
+            "Le dossier de votre photothèque, sur ce PC ou sur le réseau (par exemple \\\\openmediavault\\Photos). "
+            "Seuls les doublons que vous écarterez seront déplacés, dans un dossier « _Doublons »." if dups else
+            "Le dossier contenant les photos (une carte mémoire, un dossier « À trier », une ancienne archive…).")
+        self.dest_card.setVisible(not dups)
+        self.find_dups.setVisible(not dups)
+        self.dups_dest.setVisible(not dups)
+        self.preferred.setVisible(dups)
+        self.preferred_hint.setVisible(dups)
+        self.analyse.setText("Rechercher les doublons  →" if dups else "Analyser les photos  →")
+        self.layout.itemAt(1).widget().setText(
+            "Choisissez la photothèque à vérifier. Rien n'est modifié avant la dernière étape : vous verrez d'abord "
+            "les doublons trouvés." if dups else
+            "Choisissez les photos à ranger et l'endroit où les classer. Rien n'est modifié avant la dernière étape : "
+            "vous verrez d'abord le résultat.")
         self.validate()
 
     def load(self):
         s = self.settings
+        (self.task_dups if s.task == TASK_DUPLICATES else self.task_sort).setChecked(True)
+        self.preferred.setText(s.preferred_folder)
         self.source.setText(s.source)
         self.destination.setText(s.destination)
         self.recursive.setChecked(s.recursive)
@@ -88,6 +137,8 @@ class FoldersPage(Page):
 
     def store(self):
         s = self.settings
+        s.task = TASK_DUPLICATES if self.duplicates_only else TASK_SORT
+        s.preferred_folder = self.preferred.text() if self.duplicates_only else ""
         s.source = self.source.text()
         s.destination = self.destination.text()
         s.recursive = self.recursive.isChecked()
@@ -103,7 +154,15 @@ class FoldersPage(Page):
         if not source:
             return ""
         if not Path(source).is_dir():
-            return "Le dossier des photos à ranger est introuvable."
+            return "Le dossier des photos est introuvable."
+        if self.duplicates_only:
+            preferred = self.preferred.text()
+            if preferred:
+                pref = os.path.normcase(os.path.abspath(preferred))
+                src = os.path.normcase(os.path.abspath(source))
+                if pref != src and not pref.startswith(src + os.sep):
+                    return "Le dossier préféré doit se trouver dans la photothèque."
+            return ""
         if not destination:
             return ""
         src = os.path.normcase(os.path.abspath(source))
@@ -119,7 +178,8 @@ class FoldersPage(Page):
         problem = self.problem()
         self.message.setText(problem)
         self.message.setVisible(bool(problem))
-        self.analyse.setEnabled(bool(self.source.text() and self.destination.text() and not problem))
+        ready = self.source.text() and (self.duplicates_only or self.destination.text())
+        self.analyse.setEnabled(bool(ready and not problem))
 
     def request_analysis(self):
         if not (self.photos.isChecked() or self.videos.isChecked()):
@@ -127,5 +187,7 @@ class FoldersPage(Page):
             self.message.show()
             return
         self.store()
+        if self.duplicates_only:
+            self.settings.find_duplicates = True
         self.settings.save()
         self.analyse_requested.emit()

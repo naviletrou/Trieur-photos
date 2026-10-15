@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +23,7 @@ from typing import Callable
 
 import numpy as np
 
-from .model import RAW_EXT, VIDEO_EXT, MediaItem, PHOTO_EXT
+from .model import DATE_EXIF, RAW_EXT, VIDEO_EXT, MediaItem, PHOTO_EXT
 from .settings import cache_dir
 
 IDENTICAL = "Identiques"
@@ -64,6 +65,8 @@ class HashCache:
         self.db = sqlite3.connect(str(self.path), check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS h (path TEXT PRIMARY KEY, size INTEGER, mtime REAL, "
                         "sha1 TEXT, dhash TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS infos (path TEXT PRIMARY KEY, size INTEGER, mtime REAL, "
+                        "width INTEGER, height INTEGER, taken TEXT)")
 
     def get(self, path: Path, size: int, mtime: float) -> tuple[str, int | None] | None:
         with self.lock:
@@ -76,6 +79,19 @@ class HashCache:
         with self.lock:
             self.db.execute("INSERT OR REPLACE INTO h VALUES (?,?,?,?,?)",
                             (str(path), size, mtime, sha1, f"{dhash:032x}" if dhash is not None else None))
+
+    def get_info(self, path: Path, size: int, mtime: float) -> tuple[int, int, datetime | None] | None:
+        with self.lock:
+            row = self.db.execute("SELECT size, mtime, width, height, taken FROM infos WHERE path=?",
+                                  (str(path),)).fetchone()
+        if row and row[0] == size and abs(row[1] - mtime) < 0.01:
+            return row[2] or 0, row[3] or 0, datetime.fromisoformat(row[4]) if row[4] else None
+        return None
+
+    def put_info(self, path: Path, size: int, mtime: float, width: int, height: int, taken: datetime | None):
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO infos VALUES (?,?,?,?,?,?)",
+                            (str(path), size, mtime, width, height, taken.isoformat() if taken else None))
 
     def commit(self):
         with self.lock:
@@ -96,31 +112,84 @@ def sha1_of(path: Path) -> str:
 
 def dhash_of(path: Path) -> int | None:
     """Empreinte visuelle de 128 bits (différences horizontales et verticales)."""
+    return fingerprint(path)[0]
+
+
+def _exif_date(exif) -> datetime | None:
+    from .exiftool import parse_date
+    try:
+        sub = exif.get_ifd(0x8769)  # sous-répertoire EXIF
+        for tag in (36867, 36868):  # DateTimeOriginal, DateTimeDigitized
+            when = parse_date(sub.get(tag))
+            if when:
+                return when
+    except Exception:
+        pass
+    return None
+
+
+def fingerprint(path: Path) -> tuple[int | None, int, int, datetime | None]:
+    """Empreinte visuelle, largeur, hauteur et date de prise de vue, en une seule lecture du fichier."""
     if Image is None or path.suffix.lower() in RAW_EXT or path.suffix.lower() in VIDEO_EXT:
-        return None
+        return None, 0, 0, None
     try:
         with Image.open(path) as image:
+            width, height = image.size
+            exif = image.getexif()
+            taken = _exif_date(exif)
+            if exif.get(274) in (5, 6, 7, 8):  # photo tournée d'un quart de tour
+                width, height = height, width
             image.draft("L", (128, 128))  # décodage JPEG à taille réduite : bien plus rapide
             image = ImageOps.exif_transpose(image).convert("L")
             horizontal = np.asarray(image.resize((9, 8), Image.LANCZOS), dtype=np.int16)
             vertical = np.asarray(image.resize((8, 9), Image.LANCZOS), dtype=np.int16)
     except Exception:
-        return None
+        return None, 0, 0, None
     bits = np.concatenate([(horizontal[:, 1:] > horizontal[:, :-1]).ravel(),
                            (vertical[1:, :] > vertical[:-1, :]).ravel()])
     value = 0
     for bit in bits:
         value = (value << 1) | int(bit)
-    return value
+    return value, width, height, taken
 
 
 def _split(value: int) -> tuple[int, int]:
     return (value >> 64) & 0xFFFFFFFFFFFFFFFF, value & 0xFFFFFFFFFFFFFFFF
 
 
-def _score(item: MediaItem) -> tuple:
-    """La meilleure version d'une photo : la plus grande, avec sa date d'origine, le plus gros fichier."""
-    return (item.pixels, item.date_reliable, item.size, -len(str(item.path)))
+COPY_NAME = re.compile(r"^(copie de |copy of )|( - copie| - copy|copie| copy)( \(\d+\))?$|\(\d+\)$", re.I)
+
+
+def _place_score(item: MediaItem, preferred: Path | None) -> tuple:
+    """Pour deux fichiers identiques : le mieux rangé.
+
+    D'abord le dossier préféré choisi par l'utilisateur, puis un dossier daté ou nommé
+    (« 2001-07-11 Cheverny ») plutôt qu'un dossier « Divers » ou « À trier », puis un nom
+    d'origine plutôt qu'un nom de copie (« Copie de… », « IMG_1 (1).jpg »).
+    """
+    from .dates import find_date, is_generic_name, text_without_date
+    in_preferred = False
+    if preferred:
+        try:
+            item.path.relative_to(preferred)
+            in_preferred = True
+        except ValueError:
+            pass
+    folder = item.path.parent.name
+    if find_date(folder) and not is_generic_name(text_without_date(folder) or folder):
+        folder_quality = 2
+    elif find_date(folder) or not is_generic_name(folder):
+        folder_quality = 1
+    else:
+        folder_quality = 0
+    original_name = not COPY_NAME.search(item.path.stem)
+    return (in_preferred, folder_quality, original_name, -len(str(item.path)))
+
+
+def _score(item: MediaItem, preferred: Path | None = None) -> tuple:
+    """La meilleure version d'une photo : la plus grande, avec sa date d'origine, le plus gros fichier,
+    puis la mieux rangée."""
+    return (item.pixels, item.date_reliable, item.size) + _place_score(item, preferred)
 
 
 class _UnionFind:
@@ -168,11 +237,12 @@ def library_files(destination: Path, sizes: set[int], cancelled: Cancelled | Non
 
 def find_duplicates(items: list[MediaItem], destination: Path | None = None, similar: bool = True,
                     progress: Progress | None = None, cancelled: Cancelled | None = None,
-                    cache: HashCache | None = None) -> list[DuplicateGroup]:
+                    cache: HashCache | None = None, preferred: Path | None = None) -> list[DuplicateGroup]:
+    """preferred : dossier dont on garde les photos en priorité (mode « Doublons seuls »)."""
     own_cache = cache is None
     cache = cache or HashCache()
     try:
-        return _find(items, destination, similar, progress, cancelled, cache)
+        return _find(items, destination, similar, progress, cancelled, cache, preferred)
     finally:
         if own_cache:
             cache.close()
@@ -180,7 +250,7 @@ def find_duplicates(items: list[MediaItem], destination: Path | None = None, sim
             cache.commit()
 
 
-def _find(items, destination, similar, progress, cancelled, cache) -> list[DuplicateGroup]:
+def _find(items, destination, similar, progress, cancelled, cache, preferred=None) -> list[DuplicateGroup]:
     def step(label, done, total):
         if progress:
             progress(label, done, total)
@@ -218,9 +288,20 @@ def _find(items, destination, similar, progress, cancelled, cache) -> list[Dupli
                 changed = True
             except OSError:
                 sha = ""
-        if id(item) in visual_ids and dh is None:
-            dh = dhash_of(item.path)
-            changed = changed or dh is not None
+        if id(item) in visual_ids:
+            info = cache.get_info(item.path, item.size, item.mtime)
+            if dh is None or info is None:
+                dh, width, height, taken = fingerprint(item.path)
+                changed = changed or dh is not None
+                cache.put_info(item.path, item.size, item.mtime, width, height, taken)
+            else:
+                width, height, taken = info
+            # dimensions et date de prise de vue, si ExifTool ne les a pas déjà données
+            if not item.width and width:
+                item.width, item.height = width, height
+            if item.date is None and taken:
+                item.exif_date = item.date = taken
+                item.date_source, item.date_precision = DATE_EXIF, "heure"
         item.sha1, item.dhash = sha, dh
         if changed:
             cache.put(item.path, item.size, item.mtime, sha, dh)
@@ -266,7 +347,7 @@ def _find(items, destination, similar, progress, cancelled, cache) -> list[Dupli
         # un fichier déjà à sa place dans la destination (dossier source = destination) n'est pas un doublon de lui-même
         matches = [m for m in matches if all(os.path.normcase(str(m)) != os.path.normcase(str(i.path)) for i in members)]
         if len(members) > 1 or matches:
-            keep = max(members, key=_score)
+            keep = max(members, key=lambda i: _place_score(i, preferred))
             groups.append(DuplicateGroup(IDENTICAL, sorted(members, key=lambda i: str(i.path)), keep, matches))
             grouped.update(id(i) for i in members)
 
@@ -311,11 +392,11 @@ def _find(items, destination, similar, progress, cancelled, cache) -> list[Dupli
             shots = {i.date.replace(microsecond=0) for i in members if i.date and i.date_reliable}
             if len(shots) > 1:
                 if similar:
-                    keep = max(members, key=_score)
+                    keep = max(members, key=lambda i: _score(i, preferred))
                     groups.append(DuplicateGroup(SIMILAR, sorted(members, key=lambda i: i.date or datetime.min), keep))
                     grouped.update(id(i) for i in members)
                 continue
-            keep = max(members, key=_score)
+            keep = max(members, key=lambda i: _score(i, preferred))
             ids = {id(i) for i in members}
             # un groupe « identiques » entièrement compris dans celui-ci y est fusionné
             library_matches = []
@@ -328,7 +409,7 @@ def _find(items, destination, similar, progress, cancelled, cache) -> list[Dupli
             for members in collect(close):
                 if all(id(i) in grouped for i in members):
                     continue
-                keep = max(members, key=_score)
+                keep = max(members, key=lambda i: _score(i, preferred))
                 groups.append(DuplicateGroup(SIMILAR, sorted(members, key=lambda i: i.date or datetime.min), keep))
         step("Comparaison des images", n, n)
 

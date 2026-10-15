@@ -11,7 +11,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QHBoxLayout, QMessageBox, QProgressBar, QPushButton
 
 from .. import analyze
-from ..settings import MOVE
+from ..settings import MOVE, TASK_DUPLICATES
 from .widgets import Card, Page, label
 
 
@@ -48,10 +48,10 @@ class RunPage(Page):
         self.result_text = self.result_card.add(label(""))
         buttons = QHBoxLayout()
         self.open_dest = QPushButton("Ouvrir la destination")
-        self.open_dest.clicked.connect(lambda: open_folder(Path(self.settings.destination)))
+        self.open_dest.clicked.connect(self.open_target)
         self.open_journal = QPushButton("Voir le journal")
         self.open_journal.clicked.connect(self.show_journal)
-        self.undo = QPushButton("Annuler ce classement")
+        self.undo = QPushButton("Tout remettre en place")
         self.undo.clicked.connect(self.confirm_undo)
         self.again = QPushButton("Nouveau classement")
         self.again.clicked.connect(self.restart_requested)
@@ -77,6 +77,8 @@ class RunPage(Page):
     def set_analysis(self, analysis):
         self.analysis = analysis
         self.result = None
+        self.start.setText("Lancer le classement")
+        self.layout.itemAt(1).widget().setText("Dernière vérification avant de classer vos photos.")
         self.result_card.hide()
         self.progress_card.hide()
         self.start.show()
@@ -84,6 +86,9 @@ class RunPage(Page):
 
     def entered(self):
         if not self.analysis or self.result:
+            return
+        if self.settings.task == TASK_DUPLICATES:
+            self.enter_duplicates()
             return
         analyze.plan(self.analysis.groups, self.settings, check_disk=False)
         stats = analyze.summary(self.analysis.groups)
@@ -115,8 +120,30 @@ class RunPage(Page):
         else:
             self.warning.hide()
 
+    def enter_duplicates(self):
+        aside = [i for i in self.analysis.items if i.excluded and i.duplicate_of]
+        size = sum(i.size for i in aside) / 1024 ** 3
+        library = Path(self.settings.source)
+        lines = [
+            f"• <b>{len(aside):,}</b> doublons seront déplacés dans "
+            f"<b>{library / '_Doublons'}</b>, en gardant leur chemin d'origine ({size:.1f} Go)".replace(",", " "),
+            "• Aucune autre photo n'est déplacée ni renommée",
+            "• Un journal permettra de tout remettre en place",
+            "• Immich : ajoutez <b>**/_Doublons/**</b> aux motifs d'exclusion de la bibliothèque externe, "
+            "puis relancez un scan pour que les doublons disparaissent",
+        ]
+        self.recap.setText("<br>".join(lines))
+        self.warning.hide()
+        self.layout.itemAt(1).widget().setText("Dernière vérification avant de mettre les doublons de côté.")
+        self.start.setText("Mettre les doublons de côté")
+        self.start.setEnabled(bool(aside))
+
     def confirm_run(self):
-        if self.settings.mode == MOVE:
+        if self.settings.task == TASK_DUPLICATES:
+            answer = QMessageBox.question(self, "Doublons", "Déplacer les doublons dans « _Doublons » ?")
+            if answer != QMessageBox.Yes:
+                return
+        elif self.settings.mode == MOVE:
             answer = QMessageBox.question(self, "Déplacer les photos",
                                           "Les photos vont être déplacées. Continuer ?")
             if answer != QMessageBox.Yes:
@@ -144,7 +171,9 @@ class RunPage(Page):
             lines.append(f"• {result.moved} fichiers remis à leur place, {result.copied} copies retirées")
             self.undo.hide()
         else:
-            self.result_card.layout.itemAt(0).widget().setText("Classement terminé")
+            dups = self.settings.task == TASK_DUPLICATES
+            self.result_card.layout.itemAt(0).widget().setText("Doublons mis de côté" if dups else "Classement terminé")
+            self.open_dest.setText("Ouvrir le dossier _Doublons" if dups else "Ouvrir la destination")
             if result.copied:
                 lines.append(f"• {result.copied} photos copiées")
             if result.moved:
@@ -164,6 +193,13 @@ class RunPage(Page):
             lines.append(f"• <span style='color:#C26A00'>{len(result.errors)} problème(s) :</span><br>{shown}{more}")
         self.result_text.setText("<br>".join(lines) or "Rien à faire.")
         self.result_card.show()
+
+    def open_target(self):
+        if self.settings.task == TASK_DUPLICATES:
+            folder = Path(self.settings.source) / "_Doublons"
+            open_folder(folder if folder.exists() else Path(self.settings.source))
+        else:
+            open_folder(Path(self.settings.destination))
 
     def show_journal(self):
         if self.result and self.result.journal:

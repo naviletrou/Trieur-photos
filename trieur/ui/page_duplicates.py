@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QListWidg
                                QScrollArea, QSplitter, QVBoxLayout, QWidget)
 
 from ..duplicates import IDENTICAL, SAME_PHOTO, SIMILAR, DuplicateGroup
-from ..settings import MOVE
+from ..settings import MOVE, TASK_DUPLICATES
 from .style import OK
 from .thumbs import thumbnail
 from .widgets import Page, label
@@ -83,6 +83,7 @@ class DuplicatesPage(Page):
         self.settings = settings
         self.groups: list[DuplicateGroup] = []
 
+        self.intro = self.layout.itemAt(1).widget()
         self.empty = label("Aucun doublon trouvé. 👍", "pageIntro")
         self.empty.hide()
         self.layout.addWidget(self.empty)
@@ -121,6 +122,9 @@ class DuplicatesPage(Page):
         keep_all.clicked.connect(lambda: self.choose_all(best_only=False))
         nav.addWidget(keep_best)
         nav.addWidget(keep_all)
+        self.export = QPushButton("Exporter la liste (Excel)…")
+        self.export.clicked.connect(self.export_report)
+        nav.addWidget(self.export)
         nav.addStretch(1)
         self.next = QPushButton("Continuer  →")
         self.next.setObjectName("primary")
@@ -130,6 +134,17 @@ class DuplicatesPage(Page):
 
     def set_analysis(self, analysis):
         self.groups = analysis.duplicates if analysis else []
+        if self.settings.task == TASK_DUPLICATES:
+            found = sum(1 for g in self.groups for i in g.items if i.excluded)
+            total = len(analysis.items) if analysis else 0
+            self.intro.setText(
+                f"{total:,} photos et vidéos analysées, {len(self.groups):,} groupes de doublons. ".replace(",", " ") +
+                "Les photos décochées seront déplacées dans le dossier « _Doublons » de la photothèque, "
+                "avec leur chemin d'origine. Rien n'est supprimé.")
+        else:
+            self.intro.setText("Les photos décochées ne sont pas classées. En mode « Déplacer », elles sont mises de "
+                               "côté dans le dossier « _Doublons » de la destination : rien n'est jamais supprimé.")
+        self.export.setEnabled(bool(self.groups))
         self.listing.clear()
         for group in self.groups:
             entry = QListWidgetItem()
@@ -174,6 +189,24 @@ class DuplicatesPage(Page):
     def on_toggle(self, row: int):
         self.update_entry(row)
         self.changed.emit()
+
+    def export_report(self):
+        from datetime import datetime
+        from pathlib import Path
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from ..executor import write_report
+        default = Path.home() / "Documents" / f"doublons_{datetime.now():%Y-%m-%d_%Hh%M}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Enregistrer la liste des doublons", str(default),
+                                              "Fichier CSV pour Excel (*.csv)")
+        if not path:
+            return
+        try:
+            write_report(self.groups, Path(path))
+        except OSError as error:
+            QMessageBox.warning(self, "Liste des doublons", f"Enregistrement impossible : {error}")
+            return
+        from .page_run import open_folder
+        open_folder(Path(path).parent)
 
     def choose_all(self, best_only: bool):
         for group in self.groups:

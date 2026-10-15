@@ -25,6 +25,17 @@ Une version sans installation est aussi disponible (`TrieurPhotos-portable.zip`,
    messagerie…), photos presque identiques prises en rafale. Rien n'est jamais supprimé.
 5. **Lancement** : classement, journal de toutes les opérations et **annulation complète** possible.
 
+### Mode « Rechercher les doublons dans ma photothèque »
+
+Pour une photothèque déjà rangée (sur le PC ou sur le réseau) : rien n'est reclassé ni renommé.
+Les doublons trouvés sont présentés côte à côte ; ceux que l'on écarte sont déplacés dans
+`_Doublons` à la racine de la photothèque, avec leur chemin d'origine. La copie gardée est la mieux
+rangée (dossier daté ou nommé plutôt que « Divers » ou « À trier », nom d'origine plutôt que
+« Copie de… »), ou celle d'un dossier préféré que l'on choisit. Une liste des doublons peut être
+exportée pour Excel. Tout peut être remis en place grâce au journal.
+
+Avec Immich : ajoutez `**/_Doublons/**` aux motifs d'exclusion de la bibliothèque externe.
+
 ### D'où viennent la date et le lieu
 
 * **Date** : date de prise de vue (EXIF, vidéo), sinon date dans le nom du fichier

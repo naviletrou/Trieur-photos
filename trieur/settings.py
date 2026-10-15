@@ -10,12 +10,16 @@ from .patterns import DEFAULT_PRESET, PRESETS
 
 COPY = "copier"
 MOVE = "deplacer"
+TASK_SORT = "classer"
+TASK_DUPLICATES = "doublons"
 GROUP_DAY = "jour"
 GROUP_DAY_FOLDER = "jour_dossier"
 
 
 @dataclass
 class Settings:
+    task: str = TASK_SORT               # classer des photos, ou chercher les doublons d'une photothèque
+    preferred_folder: str = ""          # mode doublons : dossier dont on garde les photos en priorité
     source: str = ""
     destination: str = ""
     recursive: bool = True
