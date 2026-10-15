@@ -74,6 +74,11 @@ class FoldersPage(Page):
             "ailleurs. Sinon, le programme garde la copie la mieux rangée (dossier daté ou nommé plutôt que "
             "« Divers » ou « À trier », nom d'origine plutôt que « Copie de… »).", "hint"))
         self.preferred = dup.add(PathPicker("Dossier préféré (facultatif)", "Choisir le dossier à privilégier"))
+        self.aside_hint = dup.add(label(
+            "Où mettre les doublons écartés ? Laissez vide pour un dossier « _Doublons » dans la photothèque, ou "
+            "choisissez un dossier en dehors (un autre dossier du disque, un disque de sauvegarde, ce PC) : "
+            "Immich ne les verra jamais.", "hint"))
+        self.aside = dup.add(PathPicker("Dossier des doublons (facultatif)", "Choisir où mettre les doublons écartés"))
         self.layout.addWidget(dup)
 
         self.message = label("", "warningBox")
@@ -90,7 +95,7 @@ class FoldersPage(Page):
         self.layout.addLayout(bottom)
 
         self.load()
-        for widget in (self.source, self.destination, self.preferred):
+        for widget in (self.source, self.destination, self.preferred, self.aside):
             widget.changed.connect(self.validate)
         self.task_sort.toggled.connect(self.task_changed)
         self.task_changed()
@@ -104,7 +109,7 @@ class FoldersPage(Page):
         self.source_title.setText("Photothèque à vérifier" if dups else "Photos à ranger")
         self.source_hint.setText(
             "Le dossier de votre photothèque, sur ce PC ou sur le réseau (par exemple \\\\openmediavault\\Photos). "
-            "Seuls les doublons que vous écarterez seront déplacés, dans un dossier « _Doublons »." if dups else
+            "Seuls les doublons que vous écarterez seront déplacés, dans le dossier des doublons choisi plus bas." if dups else
             "Le dossier contenant les photos (une carte mémoire, un dossier « À trier », une ancienne archive…).")
         self.dest_card.setVisible(not dups)
         self.find_dups.setVisible(not dups)
@@ -123,6 +128,7 @@ class FoldersPage(Page):
         s = self.settings
         (self.task_dups if s.task == TASK_DUPLICATES else self.task_sort).setChecked(True)
         self.preferred.setText(s.preferred_folder)
+        self.aside.setText(s.duplicates_folder)
         self.source.setText(s.source)
         self.destination.setText(s.destination)
         self.recursive.setChecked(s.recursive)
@@ -139,6 +145,7 @@ class FoldersPage(Page):
         s = self.settings
         s.task = TASK_DUPLICATES if self.duplicates_only else TASK_SORT
         s.preferred_folder = self.preferred.text() if self.duplicates_only else ""
+        s.duplicates_folder = self.aside.text()
         s.source = self.source.text()
         s.destination = self.destination.text()
         s.recursive = self.recursive.isChecked()
@@ -155,6 +162,15 @@ class FoldersPage(Page):
             return ""
         if not Path(source).is_dir():
             return "Le dossier des photos est introuvable."
+        aside = self.aside.text()
+        if aside:
+            folder = os.path.normcase(os.path.abspath(aside))
+            libraries = [source] if self.duplicates_only else [source, destination]
+            for library in filter(None, libraries):
+                lib = os.path.normcase(os.path.abspath(library))
+                if folder == lib or folder.startswith(lib + os.sep):
+                    return ("Le dossier des doublons doit être en dehors des photos analysées "
+                            "(ou laissez-le vide pour « _Doublons »).")
         if self.duplicates_only:
             preferred = self.preferred.text()
             if preferred:

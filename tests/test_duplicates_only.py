@@ -82,3 +82,22 @@ def test_set_aside_and_undo(tmp_path):
     after = sorted(str(p.relative_to(library)) for p in library.rglob("*")
                    if p.is_file() and "_Journal" not in p.parts and "_Doublons" not in p.parts)
     assert after == before
+
+
+def test_set_aside_outside_library(tmp_path):
+    library = tmp_path / "Photos"
+    outside = tmp_path / "Sauvegarde" / "Doublons écartés"
+    make_library(library)
+    before = sorted(str(p.relative_to(library)) for p in library.rglob("*") if p.is_file())
+    items, _ = analyse(library)
+    result = executor.execute_duplicates(items, library, aside_base=outside)
+    assert result.duplicates_moved == 3 and not result.errors
+    assert not (library / "_Doublons").exists()  # rien dans la photothèque
+    assert len([p for p in outside.rglob("*") if p.is_file()]) == 3
+    assert any(p.parent.name == "Divers" for p in outside.rglob("*.jpg"))
+    settings = Settings(task=TASK_DUPLICATES, source=str(library), duplicates_folder=str(outside))
+    assert settings.duplicates_location() == outside and settings.duplicates_outside
+    executor.undo(result.journal)
+    after = sorted(str(p.relative_to(library)) for p in library.rglob("*")
+                   if p.is_file() and "_Journal" not in p.parts)
+    assert after == before

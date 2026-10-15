@@ -153,7 +153,9 @@ def execute(groups: list[Group], settings: Settings, exiftool: ExifTool | None =
                             result.errors.append(f"Date non écrite dans {target.name}")
                 elif move and (item.duplicate_of or item.already_in_library):
                     # en déplacement, les doublons écartés sont mis de côté, jamais supprimés
-                    aside = destination / DUPLICATES_DIR / stamp / item.relative
+                    aside_base = Path(settings.duplicates_folder) if settings.duplicates_folder \
+                        else destination / DUPLICATES_DIR
+                    aside = aside_base / stamp / item.relative
                     ensure_dir(aside.parent)
                     aside = _free_path(aside)
                     shutil.move(str(item.path), str(aside))
@@ -242,17 +244,19 @@ def undo(journal_path: Path, progress: Progress | None = None) -> Result:
 
 
 def execute_duplicates(items: list[MediaItem], library: Path, progress: Progress | None = None,
-                       cancelled: Cancelled | None = None) -> Result:
+                       cancelled: Cancelled | None = None, aside_base: Path | None = None) -> Result:
     """Mode « Doublons seuls » : met de côté les doublons écartés dans « _Doublons » de la photothèque.
 
     Le chemin d'origine est conservé sous _Doublons/<date>/ pour savoir d'où vient chaque fichier.
     Rien n'est supprimé, et le journal permet de tout remettre en place.
+    aside_base : dossier choisi par l'utilisateur, par exemple en dehors de la photothèque pour
+    qu'Immich ne voie jamais les doublons (par défaut : « _Doublons » dans la photothèque).
     """
     stamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
     result = Result(journal=library / JOURNAL_DIR / f"doublons_{stamp}.csv")
     journal = Journal(result.journal)
     journal.write("debut", library, "", "", "mode=doublons")
-    aside_root = library / DUPLICATES_DIR / stamp
+    aside_root = (aside_base or library / DUPLICATES_DIR) / stamp
     work = [i for i in items if i.excluded and i.duplicate_of]
     try:
         for done, item in enumerate(work, start=1):

@@ -151,7 +151,8 @@ class ExecuteWorker(Worker):
     def work(self):
         s = self.analysis.settings
         if s.task == TASK_DUPLICATES:
-            return executor.execute_duplicates(self.analysis.items, Path(s.source), self.report, self.cancelled)
+            return executor.execute_duplicates(self.analysis.items, Path(s.source), self.report, self.cancelled,
+                                               s.duplicates_location())
         self.report("Préparation", 0, 0)
         analyze.plan(self.analysis.groups, s, check_disk=True)
         with ExifTool() as et:

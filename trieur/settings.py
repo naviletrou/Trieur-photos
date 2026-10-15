@@ -20,6 +20,7 @@ GROUP_DAY_FOLDER = "jour_dossier"
 class Settings:
     task: str = TASK_SORT               # classer des photos, ou chercher les doublons d'une photothèque
     preferred_folder: str = ""          # mode doublons : dossier dont on garde les photos en priorité
+    duplicates_folder: str = ""         # où mettre les doublons écartés (vide : « _Doublons » dans la photothèque)
     source: str = ""
     destination: str = ""
     recursive: bool = True
@@ -43,6 +44,18 @@ class Settings:
     remove_empty_folders: bool = True   # après un déplacement
 
     recent_sources: list[str] = field(default_factory=list)
+
+    def duplicates_location(self) -> Path:
+        """Dossier où sont mis de côté les doublons écartés."""
+        if self.duplicates_folder:
+            return Path(self.duplicates_folder)
+        base = self.source if self.task == TASK_DUPLICATES else self.destination
+        return Path(base) / "_Doublons"
+
+    @property
+    def duplicates_outside(self) -> bool:
+        """Vrai si les doublons vont dans un dossier choisi, en dehors de la photothèque."""
+        return bool(self.duplicates_folder)
 
     @staticmethod
     def file() -> Path:

@@ -34,7 +34,10 @@ rangée (dossier daté ou nommé plutôt que « Divers » ou « À trier », nom
 « Copie de… »), ou celle d'un dossier préféré que l'on choisit. Une liste des doublons peut être
 exportée pour Excel. Tout peut être remis en place grâce au journal.
 
-Avec Immich : ajoutez `**/_Doublons/**` aux motifs d'exclusion de la bibliothèque externe.
+Les doublons peuvent aussi être mis dans un dossier choisi **en dehors** de la photothèque (autre
+dossier du disque, disque de sauvegarde, PC) : Immich ne les voit alors jamais. Sinon, avec le
+dossier `_Doublons` par défaut, ajoutez `**/_Doublons/**` aux motifs d'exclusion de la
+bibliothèque externe Immich.
 
 ### D'où viennent la date et le lieu
 

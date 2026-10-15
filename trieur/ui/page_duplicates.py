@@ -139,11 +139,11 @@ class DuplicatesPage(Page):
             total = len(analysis.items) if analysis else 0
             self.intro.setText(
                 f"{total:,} photos et vidéos analysées, {len(self.groups):,} groupes de doublons. ".replace(",", " ") +
-                "Les photos décochées seront déplacées dans le dossier « _Doublons » de la photothèque, "
+                f"Les photos décochées seront déplacées dans « {self.settings.duplicates_location()} », "
                 "avec leur chemin d'origine. Rien n'est supprimé.")
         else:
             self.intro.setText("Les photos décochées ne sont pas classées. En mode « Déplacer », elles sont mises de "
-                               "côté dans le dossier « _Doublons » de la destination : rien n'est jamais supprimé.")
+                               f"côté dans « {self.settings.duplicates_location()} » : rien n'est jamais supprimé.")
         self.export.setEnabled(bool(self.groups))
         self.listing.clear()
         for group in self.groups:

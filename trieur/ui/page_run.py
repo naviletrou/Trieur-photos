@@ -100,7 +100,7 @@ class RunPage(Page):
         ]
         if stats["ecartes"]:
             lines.append(f"• {stats['ecartes']} doublons ou photos décochées ne seront pas classés"
-                         + (" (mis de côté dans « _Doublons »)" if move else ""))
+                         + (f" (mis de côté dans « {self.settings.duplicates_location()} »)" if move else ""))
         if stats["deja_presents"]:
             lines.append(f"• {stats['deja_presents']} photos sont déjà dans la photothèque et seront ignorées")
         without = sum(1 for g in self.analysis.groups if g.effective_date is None for i in g.active_items)
@@ -126,11 +126,14 @@ class RunPage(Page):
         library = Path(self.settings.source)
         lines = [
             f"• <b>{len(aside):,}</b> doublons seront déplacés dans "
-            f"<b>{library / '_Doublons'}</b>, en gardant leur chemin d'origine ({size:.1f} Go)".replace(",", " "),
+            f"<b>{self.settings.duplicates_location()}</b>, en gardant leur chemin d'origine "
+            f"({size:.1f} Go)".replace(",", " "),
             "• Aucune autre photo n'est déplacée ni renommée",
             "• Un journal permettra de tout remettre en place",
-            "• Immich : ajoutez <b>**/_Doublons/**</b> aux motifs d'exclusion de la bibliothèque externe, "
-            "puis relancez un scan pour que les doublons disparaissent",
+            ("• Immich : relancez un scan de la bibliothèque pour que les doublons disparaissent"
+             if self.settings.duplicates_outside else
+             "• Immich : ajoutez <b>**/_Doublons/**</b> aux motifs d'exclusion de la bibliothèque externe, "
+             "puis relancez un scan pour que les doublons disparaissent"),
         ]
         self.recap.setText("<br>".join(lines))
         self.warning.hide()
@@ -140,7 +143,8 @@ class RunPage(Page):
 
     def confirm_run(self):
         if self.settings.task == TASK_DUPLICATES:
-            answer = QMessageBox.question(self, "Doublons", "Déplacer les doublons dans « _Doublons » ?")
+            answer = QMessageBox.question(self, "Doublons",
+                                          f"Déplacer les doublons dans « {self.settings.duplicates_location()} » ?")
             if answer != QMessageBox.Yes:
                 return
         elif self.settings.mode == MOVE:
@@ -173,13 +177,14 @@ class RunPage(Page):
         else:
             dups = self.settings.task == TASK_DUPLICATES
             self.result_card.layout.itemAt(0).widget().setText("Doublons mis de côté" if dups else "Classement terminé")
-            self.open_dest.setText("Ouvrir le dossier _Doublons" if dups else "Ouvrir la destination")
+            self.open_dest.setText("Ouvrir le dossier des doublons" if dups else "Ouvrir la destination")
             if result.copied:
                 lines.append(f"• {result.copied} photos copiées")
             if result.moved:
                 lines.append(f"• {result.moved} photos déplacées")
             if result.duplicates_moved:
-                lines.append(f"• {result.duplicates_moved} doublons mis de côté dans « _Doublons »")
+                lines.append(f"• {result.duplicates_moved} doublons mis de côté dans "
+                             f"« {self.settings.duplicates_location()} »")
             if result.dates_written:
                 lines.append(f"• {result.dates_written} dates écrites dans les photos")
             if result.folders_removed:
@@ -196,7 +201,7 @@ class RunPage(Page):
 
     def open_target(self):
         if self.settings.task == TASK_DUPLICATES:
-            folder = Path(self.settings.source) / "_Doublons"
+            folder = self.settings.duplicates_location()
             open_folder(folder if folder.exists() else Path(self.settings.source))
         else:
             open_folder(Path(self.settings.destination))
