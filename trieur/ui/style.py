@@ -12,6 +12,17 @@ BORDER = "#D9DEE5"
 BACKGROUND = "#F4F6F8"
 SIDEBAR = "#1D2B3A"
 
+def _assets_dir() -> str:
+    """Dossier des images de l'interface (coche…), écrit avec des « / » comme le veut Qt."""
+    from ..exiftool import app_dir
+    for base in (app_dir() / "assets", app_dir() / "_internal" / "assets"):
+        if (base / "coche.svg").exists():
+            return base.as_posix()
+    return (app_dir() / "assets").as_posix()
+
+
+ASSETS = _assets_dir()
+
 STYLE = f"""
 QWidget {{
     color: {TEXT};
@@ -212,7 +223,45 @@ QProgressBar::chunk {{
     border-radius: 5px;
 }}
 QRadioButton, QCheckBox {{
-    spacing: 8px;
+    spacing: 10px;
+}}
+/* cases à cocher et boutons radio bien visibles : bord foncé, et une fois choisis,
+   fond plein bleu marine avec une coche (ou un point) blanc */
+QCheckBox::indicator, QRadioButton::indicator, QTableView::indicator {{
+    width: 18px;
+    height: 18px;
+    background: white;
+    border: 2px solid #7D8A99;
+}}
+QCheckBox::indicator, QTableView::indicator {{
+    border-radius: 4px;
+}}
+QRadioButton::indicator {{
+    border-radius: 11px;
+}}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+    border-color: {ACCENT};
+}}
+QCheckBox::indicator:checked, QTableView::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    image: url("{ASSETS}/coche.svg");
+}}
+QRadioButton::indicator:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    image: url("{ASSETS}/point.svg");
+}}
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+    background: #E6EAEE;
+    border-color: #C2CAD3;
+}}
+QCheckBox::indicator:checked:disabled, QRadioButton::indicator:checked:disabled {{
+    background: #A9B5C2;
+    border-color: #A9B5C2;
+}}
+QCheckBox:disabled, QRadioButton:disabled {{
+    color: #8A94A0;
 }}
 QScrollArea {{
     border: none;
