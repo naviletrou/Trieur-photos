@@ -43,13 +43,29 @@ jobs:
       - name: Base des lieux
         run: python tools/build_places.py geonames geonames
 
+      - name: ExifTool (en cache)
+        id: exiftool
+        uses: actions/cache@v4
+        with:
+          path: exiftool.zip
+          key: exiftool-v1-${{ github.run_id }}
+          restore-keys: exiftool-v1-
+
       - name: ExifTool pour Windows
         shell: bash
         run: |
-          ver=$(curl -fsSL https://exiftool.org/ver.txt | tr -d '\r\n')
-          echo "ExifTool $ver"
-          curl -fsSL -o exiftool.zip "https://exiftool.org/exiftool-${ver}_64.zip" \
-            || curl -fsSL -o exiftool.zip "https://sourceforge.net/projects/exiftool/files/exiftool-${ver}_64.zip/download"
+          # plusieurs essais et un site de secours : exiftool.org répond parfois lentement
+          get() { curl -fsSL --retry 4 --retry-delay 10 --retry-all-errors --connect-timeout 20 -m 180 "$@"; }
+          ver=$(get https://exiftool.org/ver.txt | tr -d '\r\n' || true)
+          echo "ExifTool en ligne : ${ver:-inconnu}"
+          if [ -n "$ver" ]; then
+            get -o new.zip "https://exiftool.org/exiftool-${ver}_64.zip" \
+              || get -o new.zip "https://sourceforge.net/projects/exiftool/files/exiftool-${ver}_64.zip/download" \
+              || rm -f new.zip
+            if [ -s new.zip ]; then mv new.zip exiftool.zip; fi
+          fi
+          if [ ! -s exiftool.zip ]; then echo "ExifTool introuvable (ni en ligne ni en cache)"; exit 1; fi
+          rm -rf exiftool-tmp vendor/exiftool
           unzip -q exiftool.zip -d exiftool-tmp
           folder=$(dirname "$(find exiftool-tmp -name 'exiftool(-k).exe' | head -1)")
           mkdir -p vendor
