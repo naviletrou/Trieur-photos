@@ -165,6 +165,33 @@ QListWidget::item:selected {{
     background: {ACCENT_LIGHT};
     color: {TEXT};
 }}
+/* listes déroulantes, bulles d'aide et boîtes de dialogue : toujours claires,
+   même quand Windows est en mode sombre */
+QComboBox QAbstractItemView {{
+    background: white;
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    selection-background-color: {ACCENT_LIGHT};
+    selection-color: {TEXT};
+    outline: 0;
+}}
+QToolTip {{
+    background: white;
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    padding: 4px 6px;
+}}
+QDialog, QMessageBox, QInputDialog, QProgressDialog {{
+    background: {BACKGROUND};
+}}
+QMenu {{
+    background: white;
+    color: {TEXT};
+    border: 1px solid {BORDER};
+}}
+QMenu::item:selected {{
+    background: {ACCENT_LIGHT};
+}}
 QHeaderView::section {{
     background: #F0F3F6;
     border: none;
@@ -192,3 +219,31 @@ QScrollArea {{
     background: transparent;
 }}
 """
+
+
+def apply_light_theme(app):
+    """Thème clair imposé : sans cela, en mode sombre, Windows assombrit une partie des éléments
+    (listes déroulantes, boîtes de dialogue) et le texte devient illisible."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPalette
+    try:
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+    except AttributeError:  # Qt plus ancien que 6.8
+        pass
+    palette = QPalette()
+    roles = {
+        QPalette.Window: BACKGROUND, QPalette.WindowText: TEXT,
+        QPalette.Base: "#FFFFFF", QPalette.AlternateBase: "#F6F8FA",
+        QPalette.Text: TEXT, QPalette.PlaceholderText: "#8A94A0",
+        QPalette.Button: "#FFFFFF", QPalette.ButtonText: TEXT,
+        QPalette.ToolTipBase: "#FFFFFF", QPalette.ToolTipText: TEXT,
+        QPalette.Highlight: ACCENT_LIGHT, QPalette.HighlightedText: TEXT,
+        QPalette.Link: ACCENT, QPalette.BrightText: "#FFFFFF",
+        QPalette.Light: "#FFFFFF", QPalette.Midlight: "#EEF1F4", QPalette.Mid: BORDER,
+        QPalette.Dark: "#9AA5B1", QPalette.Shadow: "#5F6B7A",
+    }
+    for role, color in roles.items():
+        palette.setColor(QPalette.All, role, QColor(color))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        palette.setColor(QPalette.Disabled, role, QColor("#A0A9B4"))
+    app.setPalette(palette)

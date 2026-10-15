@@ -8,7 +8,7 @@ def main():
 
     from . import log
     from .ui.main_window import MainWindow
-    from .ui.style import STYLE
+    from .ui.style import STYLE, apply_light_theme
 
     log.setup()
 
@@ -16,6 +16,7 @@ def main():
     app.setApplicationName("Trieur de photos")
     app.setOrganizationName("TrieurPhotos")
     app.setStyle("Fusion")
+    apply_light_theme(app)
     QLocale.setDefault(QLocale(QLocale.French, QLocale.France))
     # boutons standard (Oui, Non, Annuler…) en français
     translator = QTranslator(app)
