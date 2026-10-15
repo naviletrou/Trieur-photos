@@ -14,11 +14,14 @@ from .model import (DATE_EXIF, DATE_FILE, DATE_FILENAME, DATE_FOLDER, DATE_MANUA
                     PLACE_GPS, RAW_EXT, SIDECAR_EXT, VIDEO_EXT, Group, MediaItem)
 from .patterns import render_dirs, render_name, token_values
 from .places import PlaceIndex
+from .log import logger
 from .settings import GROUP_DAY, Settings
 
 Progress = Callable[[str, int, int], None]  # (étape, fait, total)
 Cancelled = Callable[[], bool]
 
+# profondeur maximale de sous-dossiers (protection contre les boucles)
+MAX_DEPTH = 40
 # dossiers jamais parcourus
 SKIP_DIRS = {"_doublons", "_journal", "@eadir", "$recycle.bin", "system volume information",
              ".thumbnails", ".trash", ".picasaoriginals", "#recycle"}
@@ -35,7 +38,20 @@ def _norm(path: Path | str) -> str:
 # Recherche des fichiers
 # ---------------------------------------------------------------------------------------------
 
-def scan(settings: Settings, progress: Progress | None = None, cancelled: Cancelled | None = None) -> list[MediaItem]:
+def _folder_key(path: Path) -> tuple | None:
+    """Identité d'un dossier sur le disque, pour ne pas tourner en rond quand un lien symbolique
+    (fréquent sur un NAS) renvoie vers un dossier parent."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not st.st_ino:
+        return None
+    return st.st_dev, st.st_ino
+
+
+def scan(settings: Settings, progress: Progress | None = None, cancelled: Cancelled | None = None,
+         detail: Callable[[str], None] | None = None) -> list[MediaItem]:
     source = Path(settings.source)
     destination = _norm(settings.destination) if settings.destination else None
     wanted = set()
@@ -46,10 +62,25 @@ def scan(settings: Settings, progress: Progress | None = None, cancelled: Cancel
 
     items: list[MediaItem] = []
     pending = [source]
+    visited: set[tuple] = set()
     while pending:
         if cancelled and cancelled():
             break
         folder = pending.pop()
+        key = _folder_key(folder)
+        if key is not None:
+            if key in visited:
+                logger.info("  dossier déjà parcouru (lien vers un autre dossier), ignoré : %s", folder)
+                continue
+            visited.add(key)
+        if len(Path(folder).parts) - len(source.parts) > MAX_DEPTH:
+            logger.info("  dossier trop profond, ignoré : %s", folder)
+            continue
+        if detail:
+            try:
+                detail(str(Path(folder).relative_to(source)) if Path(folder) != source else source.name)
+            except ValueError:
+                detail(str(folder))
         files: dict[str, os.stat_result] = {}
         subdirs = []
         try:

@@ -148,9 +148,27 @@ class MainWindow(QMainWindow):
             dialog.setAutoClose(False)
             dialog.canceled.connect(worker.cancel)
 
+            state = {"text": "", "count": "", "detail": ""}
+
+            def refresh_label():
+                lines = [f"{state['text']}…"]
+                if state["count"]:
+                    lines.append(state["count"])
+                if state["detail"]:
+                    lines.append(state["detail"])
+                dialog.setLabelText("\n".join(lines))
+
+            def detail(text):
+                # nom du fichier ou du dossier en cours : montre que le travail avance
+                state["detail"] = text if len(text) <= 70 else "…" + text[-69:]
+                refresh_label()
+
             def progress(text, done, total):
                 count = (f"{done:,} / {total:,}" if total else (f"{done:,}" if done else "")).replace(",", " ")
-                dialog.setLabelText(f"{text}…\n{count}" if count else f"{text}…")
+                if text != state["text"]:
+                    state["detail"] = ""
+                state["text"], state["count"] = text, count
+                refresh_label()
                 if total:
                     dialog.setRange(0, total)
                     dialog.setValue(min(done, total))
@@ -159,6 +177,7 @@ class MainWindow(QMainWindow):
                 if not dialog.isVisible():
                     dialog.show()
             worker.progress.connect(progress)
+            worker.detail.connect(detail)
         else:
             worker.progress.connect(self.run.show_progress)
 

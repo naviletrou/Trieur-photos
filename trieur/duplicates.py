@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -24,6 +25,7 @@ from typing import Callable
 import numpy as np
 
 from .model import DATE_EXIF, RAW_EXT, VIDEO_EXT, MediaItem, PHOTO_EXT
+from .log import logger
 from .settings import cache_dir
 
 IDENTICAL = "Identiques"
@@ -237,12 +239,14 @@ def library_files(destination: Path, sizes: set[int], cancelled: Cancelled | Non
 
 def find_duplicates(items: list[MediaItem], destination: Path | None = None, similar: bool = True,
                     progress: Progress | None = None, cancelled: Cancelled | None = None,
-                    cache: HashCache | None = None, preferred: Path | None = None) -> list[DuplicateGroup]:
-    """preferred : dossier dont on garde les photos en priorité (mode « Doublons seuls »)."""
+                    cache: HashCache | None = None, preferred: Path | None = None,
+                    detail: Callable[[str], None] | None = None) -> list[DuplicateGroup]:
+    """preferred : dossier dont on garde les photos en priorité (mode « Doublons seuls »).
+    detail : reçoit le nom du fichier en cours de lecture."""
     own_cache = cache is None
     cache = cache or HashCache()
     try:
-        return _find(items, destination, similar, progress, cancelled, cache, preferred)
+        return _find(items, destination, similar, progress, cancelled, cache, preferred, detail)
     finally:
         if own_cache:
             cache.close()
@@ -250,7 +254,7 @@ def find_duplicates(items: list[MediaItem], destination: Path | None = None, sim
             cache.commit()
 
 
-def _find(items, destination, similar, progress, cancelled, cache, preferred=None) -> list[DuplicateGroup]:
+def _find(items, destination, similar, progress, cancelled, cache, preferred=None, detail=None) -> list[DuplicateGroup]:
     def step(label, done, total):
         if progress:
             progress(label, done, total)
@@ -273,13 +277,21 @@ def _find(items, destination, similar, progress, cancelled, cache, preferred=Non
 
     total = len(work)
     done = 0
+    read_bytes = 0
     lock = threading.Lock()
+    started = time.monotonic()
+    logger.info("  %d fichiers à examiner (%d à comparer octet par octet)", total, len(need_sha))
+    # tout de suite, sinon l'écran reste sur « Recherche des fichiers » pendant la lecture des premières photos
+    step("Recherche des doublons", 0, total)
 
     def compute(item: MediaItem):
-        nonlocal done
+        nonlocal done, read_bytes
         if cancelled and cancelled():
             return
+        begin = time.monotonic()
         cached = cache.get(item.path, item.size, item.mtime)
+        if detail and not (cached and cached[0] and cached[1] is not None):
+            detail(item.path.name)
         sha, dh = (cached if cached else ("", None))
         changed = False
         if id(item) in sha_ids and not sha:
@@ -305,13 +317,28 @@ def _find(items, destination, similar, progress, cancelled, cache, preferred=Non
         item.sha1, item.dhash = sha, dh
         if changed:
             cache.put(item.path, item.size, item.mtime, sha, dh)
+        spent = time.monotonic() - begin
+        if spent > 20:
+            logger.info("  lecture lente (%.0f s) : %s", spent, item.path)
         with lock:
             done += 1
-            if done % 25 == 0 or done == total:
-                step("Recherche des doublons", done, total)
+            if changed:
+                read_bytes += item.size
+            if done % 200 == 0:
+                elapsed = max(time.monotonic() - started, 0.1)
+                logger.info("  %d / %d fichiers, %.1f Mo/s", done, total, read_bytes / elapsed / 1e6)
+                cache.commit()  # une analyse arrêtée garde ce qui a été calculé
+        step("Recherche des doublons", done, total)
+
+    def guarded(item: MediaItem):
+        # une photo illisible ne doit jamais arrêter toute la recherche
+        try:
+            compute(item)
+        except Exception as error:
+            logger.warning("  fichier ignoré (%s) : %s", error, item.path)
 
     with ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 2) + 2)) as pool:
-        list(pool.map(compute, work.values()))
+        list(pool.map(guarded, work.values()))
     cache.commit()
     if cancelled and cancelled():
         return []

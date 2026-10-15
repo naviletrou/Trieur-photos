@@ -17,6 +17,7 @@ from ..settings import TASK_DUPLICATES, Settings
 
 class Worker(QThread):
     progress = Signal(str, int, int)
+    detail = Signal(str)  # fichier ou dossier en cours, affiché sous la progression
     done = Signal(object)
     failed = Signal(str)
 
@@ -25,6 +26,8 @@ class Worker(QThread):
         self._cancel = False
         self._step = ""
         self._step_start = 0.0
+        self._last_emit = 0.0
+        self._last_detail = 0.0
 
     def cancel(self):
         if not self._cancel:
@@ -41,7 +44,18 @@ class Worker(QThread):
                 logger.info("  fin de « %s » en %.1f s", self._step, now - self._step_start)
             logger.info("Étape : %s", label)
             self._step, self._step_start = label, now
-        self.progress.emit(label, done, total)
+            self._last_emit = 0.0
+        # appelé par plusieurs fils à la fois : au plus quelques mises à jour par seconde
+        now = time.monotonic()
+        if now - self._last_emit >= 0.2 or (total and done >= total) or done == 0:
+            self._last_emit = now
+            self.progress.emit(label, done, total)
+
+    def report_detail(self, text: str):
+        now = time.monotonic()
+        if now - self._last_detail >= 0.3:
+            self._last_detail = now
+            self.detail.emit(text)
 
     def run(self):
         start = time.monotonic()
@@ -81,7 +95,7 @@ class AnalysisWorker(Worker):
         logger.info("Source : %s · destination : %s · mode : %s · doublons : %s (destination : %s)",
                     s.source, s.destination, s.mode, s.find_duplicates, s.duplicates_in_destination)
         self.report("Recherche des fichiers", 0, 0)
-        items = analyze.scan(s, self.report, self.cancelled)
+        items = analyze.scan(s, self.report, self.cancelled, self.report_detail)
         logger.info("  %d fichiers trouvés", len(items))
         if self.cancelled():
             return None
@@ -97,7 +111,8 @@ class AnalysisWorker(Worker):
             try:
                 if s.find_duplicates:
                     duplicates = find_duplicates(items, Path(s.destination) if s.duplicates_in_destination else None,
-                                                 s.similar_photos, self.report, self.cancelled, cache)
+                                                 s.similar_photos, self.report, self.cancelled, cache,
+                                                 detail=self.report_detail)
                     apply_default_choices(duplicates)
                 if self.cancelled():
                     return None
@@ -125,7 +140,7 @@ class DuplicatesOnlyWorker(Worker):
         s = self.settings
         logger.info("Doublons seuls : %s · dossier préféré : %s", s.source, s.preferred_folder or "-")
         self.report("Recherche des fichiers", 0, 0)
-        items = analyze.scan(s, self.report, self.cancelled)
+        items = analyze.scan(s, self.report, self.cancelled, self.report_detail)
         logger.info("  %d fichiers trouvés", len(items))
         if self.cancelled():
             return None
@@ -133,7 +148,7 @@ class DuplicatesOnlyWorker(Worker):
         cache = HashCache()
         try:
             duplicates = find_duplicates(items, None, s.similar_photos, self.report, self.cancelled, cache,
-                                         preferred=preferred)
+                                         preferred=preferred, detail=self.report_detail)
         finally:
             cache.close()
         if self.cancelled():
